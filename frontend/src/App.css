@@ -1,34 +1,38 @@
-.App-logo {
-    height: 40vmin;
-    pointer-events: none;
+/* KiteAlgo - Trading Terminal Styles */
+.sidebar-link {
+  @apply flex items-center gap-3 px-3 py-2.5 text-sm font-medium rounded-sm transition-colors;
+}
+.sidebar-link:hover {
+  @apply bg-zinc-800/60 text-white;
+}
+.sidebar-link.active {
+  @apply bg-zinc-800 text-white border-l-2 border-blue-500;
 }
 
-@media (prefers-reduced-motion: no-preference) {
-    .App-logo {
-        animation: App-logo-spin infinite 20s linear;
-    }
+.metric-card {
+  @apply bg-zinc-900 border border-zinc-800 rounded-sm p-4 transition-all;
+}
+.metric-card:hover {
+  @apply border-zinc-700;
 }
 
-.App-header {
-    background-color: #0f0f10;
-    min-height: 100vh;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    font-size: calc(10px + 2vmin);
-    color: white;
+.data-table th {
+  @apply text-xs uppercase tracking-wider text-zinc-500 font-sans px-3 py-2.5 text-left border-b border-zinc-800;
+}
+.data-table td {
+  @apply px-3 py-2.5 text-sm font-mono border-b border-zinc-800/50;
+}
+.data-table tr:hover {
+  @apply bg-zinc-800/30;
 }
 
-.App-link {
-    color: #61dafb;
-}
-
-@keyframes App-logo-spin {
-    from {
-        transform: rotate(0deg);
-    }
-    to {
-        transform: rotate(360deg);
-    }
+.terminal-log {
+  @apply font-mono text-xs leading-relaxed text-zinc-400;
+  background: repeating-linear-gradient(
+    0deg,
+    transparent,
+    transparent 19px,
+    rgba(39, 39, 42, 0.15) 19px,
+    rgba(39, 39, 42, 0.15) 20px
+  );
 }
