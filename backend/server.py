@@ -263,8 +263,8 @@ async def generate_signals_manual(strategy_name: str = "sma_crossover", symbol: 
                 signal = strategy.on_candle(candle)
                 if signal:
                     sig_doc = signal.model_dump()
+                    signals_generated.append(sig_doc.copy())
                     await db.signals.insert_one(sig_doc)
-                    signals_generated.append(sig_doc)
         return {"count": len(signals_generated), "signals": signals_generated[:10]}
     except Exception as e:
         raise HTTPException(500, str(e))
@@ -300,7 +300,7 @@ async def place_order_manual(req: PlaceOrderRequest):
         signal, order_type=req.order_type, product=req.product
     )
     if result.get("success"):
-        await db.orders.insert_one(result["order"])
+        await db.orders.insert_one(result["order"].copy())
         await db.signals.insert_one(signal.model_dump())
     return result
 
