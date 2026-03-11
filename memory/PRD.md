@@ -84,3 +84,17 @@ Build a production-style, end-to-end Python algo trading bot for Indian markets 
 3. Trade journal with export functionality
 4. Performance optimization for large datasets
 5. CLI commands (init-db, sync-instruments, etc.)
+
+## Feature: Strategy Parameter Optimizer (March 2026)
+### What was built
+- Backend POST /api/optimizer/run: Grid search across parameter ranges, returns heatmap data + sorted results
+- Backend GET /api/optimizer/results: List past optimizations
+- Backend GET /api/optimizer/results/{id}: Load full optimization with heatmap
+- Frontend /optimizer page: Config panel, heatmap visualization, sortable results table
+- Dynamic parameter range editor (min/max/step per parameter)
+- Add/remove custom parameters
+- Metric selector (Return %, Sharpe Ratio, Win Rate, Max Drawdown)
+- Color-coded heatmap with best cell highlighted
+- Previous optimizations table with load functionality
+- Max 2500 combinations safety limit
+### Test Results: 100% pass rate (backend + frontend)
