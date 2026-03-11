@@ -265,6 +265,77 @@ class AlgoTradingAPITester:
             
         return success
 
+    def test_optimizer(self):
+        """Test optimizer functionality"""
+        print("\n🔍 Testing Optimizer Functionality...")
+        
+        # Test getting past optimizer results first
+        success1, past_results = self.test_api_call("Get Optimizer Results", "GET", "optimizer/results", params={"limit": 5})
+        if success1 and isinstance(past_results, list):
+            print(f"   Found {len(past_results)} previous optimizer results")
+
+        # Test running optimizer with small parameter grid
+        optimizer_config = {
+            "strategy_name": "sma_crossover",
+            "symbol": "RELIANCE",
+            "start_date": "2024-01-01", 
+            "end_date": "2025-06-01",
+            "initial_capital": 100000,
+            "quantity": 10,
+            "timeframe": "day",
+            "param_ranges": {
+                "fast_period": {"min": 5, "max": 10, "step": 1},
+                "slow_period": {"min": 15, "max": 20, "step": 2}
+            },
+            "fixed_params": {}
+        }
+        
+        print("   Running optimizer with small grid (18 combinations)...")
+        success2, result = self.test_api_call("Run Optimizer", "POST", "optimizer/run", 200, optimizer_config)
+        
+        optimizer_result_id = None
+        if success2 and result:
+            print(f"   Optimization completed with {result.get('total_combinations', 0)} combinations")
+            print(f"   Best return: {result.get('best_return_pct', 0):.2f}%")
+            print(f"   Best params: {result.get('best_params', {})}")
+            
+            # Check heatmap data structure
+            heatmap = result.get('heatmap')
+            if heatmap:
+                print(f"   Heatmap: {heatmap.get('x_param')} vs {heatmap.get('y_param')}")
+                print(f"   Grid size: {len(heatmap.get('x_values', []))} x {len(heatmap.get('y_values', []))}")
+            else:
+                print("   No heatmap data (expected for 1D optimization)")
+            
+            optimizer_result_id = result.get('id')
+            
+        # Test getting specific optimizer result if we have an ID
+        success3 = True
+        if optimizer_result_id:
+            success3, detail = self.test_api_call(f"Get Optimizer Detail", "GET", f"optimizer/results/{optimizer_result_id}")
+            if success3 and detail:
+                print(f"   Retrieved optimizer detail with {len(detail.get('results', []))} result entries")
+
+        # Test invalid optimizer request (too many combinations)
+        large_config = {
+            "strategy_name": "sma_crossover",
+            "symbol": "RELIANCE", 
+            "start_date": "2024-01-01",
+            "end_date": "2025-06-01",
+            "initial_capital": 100000,
+            "quantity": 10,
+            "param_ranges": {
+                "fast_period": {"min": 1, "max": 100, "step": 1},
+                "slow_period": {"min": 1, "max": 100, "step": 1}
+            }
+        }
+        
+        success4, _ = self.test_api_call("Large Grid Rejection", "POST", "optimizer/run", 400, large_config)
+        if success4:
+            print("   Large grid correctly rejected (10000 combinations > 2500 limit)")
+
+        return success1 and success2 and success3 and success4
+
     def run_all_tests(self):
         """Run all test suites"""
         print("🚀 Starting Algo Trading Bot API Tests")
@@ -281,6 +352,7 @@ class AlgoTradingAPITester:
         backtest_ok = self.test_backtest()
         settings_ok = self.test_settings_and_instruments()
         signals_ok = self.test_manual_signal_generation()
+        optimizer_ok = self.test_optimizer()
         
         # Print final results
         print("\n" + "=" * 60)
@@ -306,7 +378,8 @@ class AlgoTradingAPITester:
             "risk_controls": risk_ok,
             "backtest": backtest_ok,
             "settings": settings_ok,
-            "signals": signals_ok
+            "signals": signals_ok,
+            "optimizer": optimizer_ok
         }
         
         critical_failed = not (health_ok and dashboard_ok and bot_control_ok)

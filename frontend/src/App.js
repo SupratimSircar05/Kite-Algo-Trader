@@ -8,6 +8,7 @@ import BacktestLab from "@/pages/BacktestLab";
 import StrategyEditor from "@/pages/StrategyEditor";
 import RiskControls from "@/pages/RiskControls";
 import Settings from "@/pages/Settings";
+import Optimizer from "@/pages/Optimizer";
 import { Toaster } from "@/components/ui/sonner";
 
 function App() {
@@ -23,6 +24,7 @@ function App() {
               <Route path="/backtest" element={<BacktestLab />} />
               <Route path="/strategies" element={<StrategyEditor />} />
               <Route path="/risk" element={<RiskControls />} />
+              <Route path="/optimizer" element={<Optimizer />} />
               <Route path="/settings" element={<Settings />} />
             </Routes>
           </main>

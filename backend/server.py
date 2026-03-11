@@ -450,6 +450,216 @@ async def get_backtest_detail(result_id: str):
     return result
 
 
+# ==================== OPTIMIZER ====================
+class ParamRange(BaseModel):
+    min: float
+    max: float
+    step: float
+
+class OptimizerRequest(BaseModel):
+    strategy_name: str = "sma_crossover"
+    symbol: str = "RELIANCE"
+    start_date: str = "2024-01-01"
+    end_date: str = "2025-06-01"
+    initial_capital: float = 100000.0
+    quantity: int = 10
+    timeframe: str = "day"
+    param_ranges: Dict[str, Dict[str, float]] = Field(
+        default_factory=lambda: {
+            "fast_period": {"min": 5, "max": 20, "step": 1},
+            "slow_period": {"min": 15, "max": 50, "step": 5},
+        }
+    )
+    fixed_params: Dict[str, Any] = Field(default_factory=dict)
+
+import itertools
+import numpy as np
+
+def _generate_param_grid(param_ranges: Dict[str, Dict[str, float]]) -> List[Dict[str, Any]]:
+    """Generate all parameter combinations from ranges."""
+    axes = {}
+    for name, rng in param_ranges.items():
+        mn, mx, step = rng["min"], rng["max"], rng["step"]
+        if step <= 0:
+            axes[name] = [mn]
+        else:
+            vals = []
+            v = mn
+            while v <= mx + 1e-9:
+                vals.append(round(v, 6))
+                v += step
+            axes[name] = vals
+    keys = list(axes.keys())
+    combos = list(itertools.product(*(axes[k] for k in keys)))
+    return [dict(zip(keys, combo)) for combo in combos], axes
+
+@api_router.post("/optimizer/run")
+async def run_optimizer(req: OptimizerRequest):
+    """Run backtest grid search across parameter ranges. Returns heatmap data."""
+    try:
+        if req.strategy_name not in STRATEGY_REGISTRY:
+            raise HTTPException(400, f"Unknown strategy: {req.strategy_name}")
+
+        combos, axes = _generate_param_grid(req.param_ranges)
+        if len(combos) > 2500:
+            raise HTTPException(400, f"Too many combinations ({len(combos)}). Max 2500. Increase step sizes.")
+        if len(combos) == 0:
+            raise HTTPException(400, "No parameter combinations generated. Check ranges.")
+
+        # Generate candle data once
+        candles = await paper_broker.get_historical_data(
+            req.symbol, "NSE", req.timeframe, req.start_date, req.end_date
+        )
+        if not candles or len(candles) < 30:
+            raise HTTPException(400, "Insufficient candle data for optimization")
+
+        grid_results = []
+        best_result = None
+        best_return = -float("inf")
+
+        for combo in combos:
+            params = {**req.fixed_params, **combo}
+            # Convert float params that should be int (periods etc.)
+            for k, v in params.items():
+                if isinstance(v, float) and v == int(v):
+                    params[k] = int(v)
+
+            try:
+                strategy = get_strategy(req.strategy_name, params)
+                engine = BacktestEngine(
+                    strategy=strategy,
+                    initial_capital=req.initial_capital,
+                    quantity=req.quantity,
+                )
+                result = engine.run(candles, symbol=req.symbol, exchange="NSE")
+                entry = {
+                    "params": combo,
+                    "total_return_pct": result.total_return_pct,
+                    "total_return": result.total_return,
+                    "total_trades": result.total_trades,
+                    "win_rate": result.win_rate,
+                    "max_drawdown_pct": result.max_drawdown_pct,
+                    "sharpe_ratio": result.sharpe_ratio,
+                    "profit_factor": result.profit_factor,
+                    "expectancy": result.expectancy,
+                    "final_capital": result.final_capital,
+                }
+                grid_results.append(entry)
+                if result.total_return_pct > best_return:
+                    best_return = result.total_return_pct
+                    best_result = entry
+            except Exception as e:
+                grid_results.append({
+                    "params": combo,
+                    "total_return_pct": 0,
+                    "total_return": 0,
+                    "total_trades": 0,
+                    "win_rate": 0,
+                    "max_drawdown_pct": 0,
+                    "sharpe_ratio": 0,
+                    "profit_factor": 0,
+                    "expectancy": 0,
+                    "final_capital": req.initial_capital,
+                    "error": str(e),
+                })
+
+        # Build heatmap data: pick first 2 param names as axes
+        param_names = list(req.param_ranges.keys())
+        heatmap = None
+        if len(param_names) >= 2:
+            x_param, y_param = param_names[0], param_names[1]
+            x_vals = sorted(set(r["params"][x_param] for r in grid_results))
+            y_vals = sorted(set(r["params"][y_param] for r in grid_results))
+            lookup = {}
+            for r in grid_results:
+                key = (r["params"][x_param], r["params"][y_param])
+                lookup[key] = r
+            heatmap_grid = []
+            for y in y_vals:
+                row = []
+                for x in x_vals:
+                    entry = lookup.get((x, y))
+                    row.append({
+                        "x": x, "y": y,
+                        "return_pct": entry["total_return_pct"] if entry else 0,
+                        "sharpe": entry["sharpe_ratio"] if entry else 0,
+                        "trades": entry["total_trades"] if entry else 0,
+                        "win_rate": entry["win_rate"] if entry else 0,
+                        "drawdown": entry["max_drawdown_pct"] if entry else 0,
+                    })
+                heatmap_grid.append(row)
+            heatmap = {
+                "x_param": x_param,
+                "y_param": y_param,
+                "x_values": x_vals,
+                "y_values": y_vals,
+                "grid": heatmap_grid,
+            }
+        elif len(param_names) == 1:
+            # 1D scan - still return as heatmap with single row
+            x_param = param_names[0]
+            x_vals = sorted(set(r["params"][x_param] for r in grid_results))
+            heatmap = {
+                "x_param": x_param,
+                "y_param": None,
+                "x_values": x_vals,
+                "y_values": [0],
+                "grid": [[{
+                    "x": r["params"][x_param], "y": 0,
+                    "return_pct": r["total_return_pct"],
+                    "sharpe": r["sharpe_ratio"],
+                    "trades": r["total_trades"],
+                    "win_rate": r["win_rate"],
+                    "drawdown": r["max_drawdown_pct"],
+                } for r in sorted(grid_results, key=lambda r: r["params"][x_param])]],
+            }
+
+        # Sort results by return descending
+        grid_results.sort(key=lambda r: r["total_return_pct"], reverse=True)
+
+        opt_result = {
+            "id": gen_id(),
+            "strategy_name": req.strategy_name,
+            "symbol": req.symbol,
+            "start_date": req.start_date,
+            "end_date": req.end_date,
+            "initial_capital": req.initial_capital,
+            "quantity": req.quantity,
+            "param_ranges": req.param_ranges,
+            "fixed_params": req.fixed_params,
+            "total_combinations": len(combos),
+            "best_params": best_result["params"] if best_result else {},
+            "best_return_pct": best_return,
+            "best_result": best_result,
+            "heatmap": heatmap,
+            "results": grid_results,
+            "created_at": now_utc(),
+        }
+        await db.optimizer_results.insert_one(opt_result.copy())
+        return opt_result
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Optimizer failed: {e}")
+        raise HTTPException(500, str(e))
+
+
+@api_router.get("/optimizer/results")
+async def get_optimizer_results(limit: int = Query(20, le=50)):
+    results = await db.optimizer_results.find(
+        {}, {"_id": 0, "results": 0, "heatmap": 0}
+    ).sort("created_at", -1).to_list(limit)
+    return results
+
+
+@api_router.get("/optimizer/results/{result_id}")
+async def get_optimizer_detail(result_id: str):
+    result = await db.optimizer_results.find_one({"id": result_id}, {"_id": 0})
+    if not result:
+        raise HTTPException(404, "Optimizer result not found")
+    return result
+
+
 # ==================== SETTINGS ====================
 @api_router.get("/settings")
 async def get_settings():
