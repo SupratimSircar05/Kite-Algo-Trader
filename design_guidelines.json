@@ -1,0 +1,162 @@
+{
+  "project_overview": {
+    "name": "KiteAlgo - Pro Trading Terminal",
+    "persona": "E1 - The Anti-AI Designer",
+    "tone": "Precision, High-Frequency, Institutional, 'The Matrix' but usable",
+    "target_audience": "Quantitative traders, algo enthusiasts",
+    "design_archetype": "The Performance Pro (Dark Mode Exclusive)"
+  },
+  "theme_strategy": {
+    "mode": "dark",
+    "force_mode": true,
+    "rationale": "Trading terminals must be dark to reduce eye strain during long market sessions and to make color-coded data (Green/Red) pop instantly."
+  },
+  "typography": {
+    "primary_font": {
+      "name": "IBM Plex Sans",
+      "type": "Sans-serif",
+      "usage": "UI Elements, Headings, Labels",
+      "install_command": "@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&display=swap');",
+      "css_family": "'IBM Plex Sans', sans-serif"
+    },
+    "mono_font": {
+      "name": "JetBrains Mono",
+      "type": "Monospace",
+      "usage": "Prices, PnL, Order Book, Logs, Code Snippets",
+      "install_command": "@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&display=swap');",
+      "css_family": "'JetBrains Mono', monospace"
+    },
+    "rules": [
+      "Use JetBrains Mono for ALL numerical data, especially prices and PnL.",
+      "Headings (h1-h3) use IBM Plex Sans font-medium or font-semibold. Avoid font-black.",
+      "Tabular lining figures for data tables to ensure alignment."
+    ]
+  },
+  "color_palette": {
+    "base": {
+      "background": "#0A0A0A",
+      "surface": "#121212",
+      "surface_highlight": "#1E1E1E",
+      "border": "#27272A",
+      "text_primary": "#FFFFFF",
+      "text_secondary": "#A1A1AA",
+      "text_muted": "#71717A"
+    },
+    "brand": {
+      "primary": "#3B82F6",
+      "accent": "#6366F1"
+    },
+    "semantic": {
+      "success": "#10B981",
+      "success_dim": "#064E3B",
+      "danger": "#EF4444",
+      "danger_dim": "#7F1D1D",
+      "warning": "#F59E0B",
+      "info": "#3B82F6",
+      "buy": "#22C55E",
+      "sell": "#EF4444"
+    },
+    "gradients": {
+      "profit_glow": "linear-gradient(180deg, rgba(34, 197, 94, 0.1) 0%, rgba(34, 197, 94, 0) 100%)",
+      "loss_glow": "linear-gradient(180deg, rgba(239, 68, 68, 0.1) 0%, rgba(239, 68, 68, 0) 100%)"
+    }
+  },
+  "layout_system": {
+    "grid_mode": "Bento Grid Mode B (High Density)",
+    "container_padding": "p-4 md:p-6",
+    "gap_strategy": "gap-2 or gap-4 (Tight for data density)",
+    "border_radius": "rounded-sm (2px) or rounded-md (4px). Avoid large rounded corners.",
+    "z_index_hierarchy": {
+      "base": 0,
+      "sticky_nav": 40,
+      "overlays": 50,
+      "modals": 100,
+      "toasts": 200
+    }
+  },
+  "ui_components": {
+    "buttons": {
+      "style": "Flat, Sharp or slightly rounded (rounded-sm)",
+      "variants": {
+        "primary": "bg-primary text-primary-foreground hover:bg-primary/90",
+        "buy": "bg-emerald-600 hover:bg-emerald-500 text-white font-mono uppercase tracking-wider",
+        "sell": "bg-rose-600 hover:bg-rose-500 text-white font-mono uppercase tracking-wider",
+        "kill_switch": "bg-destructive text-destructive-foreground border-2 border-red-900 hover:bg-red-700 font-bold uppercase tracking-widest shadow-[0_0_15px_rgba(239,68,68,0.5)]"
+      }
+    },
+    "cards": {
+      "style": "Flat background (surface), 1px border (border-zinc-800)",
+      "interaction": "No hover lift for data cards. Static reliability.",
+      "header_style": "border-b border-zinc-800 bg-zinc-900/50 p-3"
+    },
+    "tables": {
+      "density": "compact",
+      "font": "font-mono text-sm",
+      "row_hover": "hover:bg-zinc-800/50",
+      "header": "text-xs uppercase tracking-wider text-zinc-500 font-sans"
+    },
+    "status_indicators": {
+      "live": "w-2 h-2 rounded-full bg-emerald-500 shadow-[0_0_8px_#10B981] animate-pulse",
+      "offline": "w-2 h-2 rounded-full bg-zinc-500",
+      "error": "w-2 h-2 rounded-full bg-red-500"
+    }
+  },
+  "visual_enhancers": {
+    "glassmorphism": "Use sparingly. Only for sticky headers or command palettes. backdrop-blur-md bg-black/70 border-b border-white/10.",
+    "scanlines": "Optional: very subtle repeating-linear-gradient on the background of the 'Terminal/Logs' section to give a retro-tech feel.",
+    "borders": "Use 'Grid Borders' strategy. 1px borders between all dashboard widgets to create a structured control panel look."
+  },
+  "page_specific_guidelines": {
+    "dashboard_overview": {
+      "layout": "Grid 12-col. Top row: Key Metrics (PnL, Margin). Middle: Main Chart (Left 8), Positions (Right 4). Bottom: Logs/Orders.",
+      "key_feature": "Equity Curve must be prominent. PnL text color must dynamically switch green/red."
+    },
+    "trade_monitor": {
+      "style": "Spreadsheet-like density. Alternating row colors optional but keep contrast high.",
+      "columns": "Symbol, Signal, Qty, Entry, LTP, PnL, Status, Action"
+    },
+    "strategy_editor": {
+      "style": "Code-editor vibe. Darker background (#050505). Syntax highlighting colors for parameters.",
+      "inputs": "Input fields should look like terminal inputs (no background, bottom border only) OR solid matte boxes."
+    },
+    "risk_controls": {
+      "style": "Hazard UI. Use yellow/amber striping for warning zones. The Kill Switch must be separated visually from other controls."
+    }
+  },
+  "assets": {
+    "icons": {
+      "library": "lucide-react",
+      "style": "Stroke width 1.5px or 2px. Sharp edges preferred.",
+      "mappings": {
+        "dashboard": "LayoutDashboard",
+        "trade": "ArrowRightLeft",
+        "chart": "LineChart",
+        "settings": "Settings",
+        "risk": "ShieldAlert",
+        "logs": "Terminal",
+        "bot": "Bot"
+      }
+    },
+    "images": {
+      "logo_placeholder": "Use a simple geometric shape (e.g., a hexagon or diamond) using CSS/SVG. No external logo images needed."
+    }
+  },
+  "universal_guidelines": [
+    "NEVER use gradients for text in a dashboard. Legibility is paramount.",
+    "Always use 'data-testid' on interactive elements (buttons, inputs, rows).",
+    "Don't animate chart data points excessively. Updates should be snappy.",
+    "Use 'sonner' for notifications (Trade executed, Error, etc.).",
+    "Scrollbars: Customize to be thin and dark (bg-zinc-900 thumb-zinc-700).",
+    "Input fields: Use Shadcn Input but customize ring color to brand primary.",
+    "Contrast: Ensure text on Red/Green badges is readable (usually White text on Dark Red/Green is better than Black text)."
+  ],
+  "instructions_to_main_agent": {
+    "step_1": "Setup the dark theme in tailwind.config.js and index.css as defined in 'theme_strategy'.",
+    "step_2": "Install the required fonts via Google Fonts import in index.css.",
+    "step_3": "Create the layout shell (Sidebar + Main Content Area). Use a fixed sidebar for quick navigation.",
+    "step_4": "Implement the Dashboard page with dummy data first to establish the grid layout.",
+    "step_5": "Build the 'Live Trade Monitor' using a dense table component.",
+    "step_6": "Implement the 'Strategy Editor' with form components.",
+    "step_7": "Build the 'Risk Controls' with the distinct Kill Switch UI."
+  }
+}
