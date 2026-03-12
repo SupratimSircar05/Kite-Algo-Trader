@@ -2,6 +2,7 @@
 Walk-Forward Optimization: Train/test split approach to reduce overfitting.
 Splits data into windows, optimizes on train set, validates on test set.
 """
+import gc
 import logging
 from typing import List, Dict, Any, Optional
 import itertools
@@ -47,7 +48,7 @@ class WalkForwardEngine:
             if isinstance(v, float) and v == int(v):
                 params[k] = int(v)
         strategy = get_strategy(self.strategy_name, params)
-        engine = BacktestEngine(strategy, self.initial_capital, quantity=self.quantity)
+        engine = BacktestEngine(strategy, self.initial_capital, quantity=self.quantity, lightweight=True)
         result = engine.run(candles, symbol=symbol)
         return {
             "params": params,
@@ -68,10 +69,9 @@ class WalkForwardEngine:
             return {"error": "Insufficient data for walk-forward analysis", "windows": 0}
 
         combos = self._gen_combos()
-        if len(combos) > 500:
-            # Subsample for speed
+        if len(combos) > 300:
             import random
-            combos = random.sample(combos, 500)
+            combos = random.sample(combos, 300)
 
         windows = []
         oos_results = []  # Out-of-sample results
@@ -91,7 +91,7 @@ class WalkForwardEngine:
             # Optimize on train
             best_params = None
             best_return = -float("inf")
-            for combo in combos:
+            for idx, combo in enumerate(combos):
                 try:
                     result = self._run_bt(train_data, dict(combo), symbol)
                     if result["total_return_pct"] > best_return:
@@ -99,6 +99,8 @@ class WalkForwardEngine:
                         best_params = dict(combo)
                 except Exception:
                     continue
+                if idx % 25 == 0:
+                    gc.collect()
 
             if best_params is None:
                 continue

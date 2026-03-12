@@ -1,5 +1,6 @@
 import random
 import logging
+import hashlib
 from typing import List, Dict, Any, Optional
 from datetime import datetime, timezone
 
@@ -80,8 +81,8 @@ class PaperBroker(BrokerBase):
         self, symbol: str, exchange: str, timeframe: str,
         from_date: str, to_date: str
     ) -> List[Dict[str, Any]]:
-        """Generate synthetic historical data for paper trading."""
-        from datetime import timedelta
+        """Generate deterministic synthetic historical data for paper trading."""
+        from datetime import timedelta, time as dt_time
         import math
 
         candles = []
@@ -89,25 +90,40 @@ class PaperBroker(BrokerBase):
         start = datetime.fromisoformat(from_date.replace("Z", "+00:00")) if "T" in from_date else datetime.strptime(from_date, "%Y-%m-%d")
         end = datetime.fromisoformat(to_date.replace("Z", "+00:00")) if "T" in to_date else datetime.strptime(to_date, "%Y-%m-%d")
 
-        delta = timedelta(days=1) if timeframe == "day" else timedelta(minutes=int(timeframe.replace("m", ""))) if "m" in timeframe else timedelta(days=1)
+        is_intraday = timeframe.endswith("m")
+        step_minutes = int(timeframe.replace("m", "")) if is_intraday else None
+        delta = timedelta(days=1) if timeframe == "day" else timedelta(minutes=step_minutes) if is_intraday else timedelta(days=1)
+        session_open = dt_time(9, 15)
+        session_close = dt_time(15, 30)
+        seed_key = f"{symbol}:{exchange}:{timeframe}:{from_date}:{to_date}".encode()
+        rng = random.Random(int(hashlib.sha256(seed_key).hexdigest()[:12], 16))
 
-        current = start
+        current = start.replace(hour=9, minute=15, second=0, microsecond=0) if is_intraday else start
         price = base_price
         day_count = 0
         while current <= end:
-            if current.weekday() < 5:
+            in_session = True
+            if is_intraday:
+                in_session = session_open <= current.time() <= session_close
+            if current.weekday() < 5 and in_session:
+                intraday_factor = 1.0
+                if is_intraday:
+                    session_minutes = ((current.hour * 60 + current.minute) - (9 * 60 + 15))
+                    intraday_factor = 0.4 + abs(math.sin(session_minutes / 375 * math.pi))
                 trend = math.sin(day_count * 0.1) * 0.005
-                noise = random.gauss(0, 0.01)
+                cyclical = math.sin(day_count * 0.03 + (step_minutes or 1440) / 60) * 0.0025
+                noise = rng.gauss(0, 0.01 * intraday_factor)
                 change = trend + noise
                 o = round(price, 2)
-                h = round(price * (1 + abs(random.gauss(0, 0.008))), 2)
-                l = round(price * (1 - abs(random.gauss(0, 0.008))), 2)
-                c = round(price * (1 + change), 2)
+                c = round(max(1.0, price * (1 + change + cyclical)), 2)
+                range_noise = max(0.002, abs(rng.gauss(0, 0.006 * intraday_factor)))
+                h = round(max(o, c) * (1 + range_noise), 2)
+                l = round(min(o, c) * (1 - range_noise), 2)
                 if h < max(o, c):
-                    h = max(o, c) + round(random.uniform(0.5, 3.0), 2)
+                    h = max(o, c) + round(rng.uniform(0.5, 3.0), 2)
                 if l > min(o, c):
-                    l = min(o, c) - round(random.uniform(0.5, 3.0), 2)
-                vol = int(random.gauss(500000, 150000))
+                    l = min(o, c) - round(rng.uniform(0.5, 3.0), 2)
+                vol = int(rng.gauss(500000 * intraday_factor, 120000 * intraday_factor))
                 candles.append({
                     "timestamp": current.isoformat(),
                     "open": o, "high": h, "low": l, "close": c,
@@ -115,6 +131,10 @@ class PaperBroker(BrokerBase):
                 })
                 price = c
                 day_count += 1
+            if is_intraday and current.time() >= session_close:
+                next_day = current + timedelta(days=1)
+                current = next_day.replace(hour=9, minute=15, second=0, microsecond=0)
+                continue
             current += delta
         return candles
 

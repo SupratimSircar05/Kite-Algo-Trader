@@ -1,16 +1,19 @@
 from fastapi import FastAPI, APIRouter, HTTPException, Query
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
+import asyncio
 import os
+import gc
 import logging
 import csv
 import io
+import itertools
+import math
 from pathlib import Path
 from pydantic import BaseModel, Field
 from typing import List, Optional, Dict, Any
-import uuid
 from datetime import datetime, timezone
 
 from trading_bot.models import (
@@ -34,6 +37,7 @@ from trading_bot.alerts import alert_manager
 from trading_bot.walk_forward import WalkForwardEngine
 from trading_bot.live_ticks import live_tick_manager
 from trading_bot.ml_signals import ml_service
+from trading_bot.job_queue import JobQueueManager
 from trading_bot.portfolio_risk import portfolio_risk_manager
 
 # Register TrendShift strategy
@@ -58,9 +62,348 @@ risk_config = RiskConfig()
 risk_manager = RiskManager(risk_config)
 trade_engine = TradeEngine()
 order_manager = OrderManager(paper_broker, risk_manager, TradingMode.PAPER)
+job_queue = JobQueueManager(db)
 bot_status = BotStatus.IDLE
 bot_run_id: Optional[str] = None
 bot_start_time: Optional[datetime] = None
+
+
+def _chunk_items(items: List[Dict[str, Any]], chunk_size: int) -> List[List[Dict[str, Any]]]:
+    return [items[index:index + chunk_size] for index in range(0, len(items), chunk_size)]
+
+
+async def _store_chunked_items(collection_name: str, parent_field: str, parent_id: str, kind: str, items: List[Dict[str, Any]], chunk_size: int):
+    await db[collection_name].delete_many({parent_field: parent_id, "kind": kind})
+    if not items:
+        return
+    docs = [
+        {
+            parent_field: parent_id,
+            "kind": kind,
+            "chunk_index": chunk_index,
+            "items": chunk,
+            "created_at": now_utc(),
+        }
+        for chunk_index, chunk in enumerate(_chunk_items(items, chunk_size))
+    ]
+    await db[collection_name].insert_many(docs)
+
+
+async def _load_chunked_items(collection_name: str, parent_field: str, parent_id: str, kind: str) -> List[Dict[str, Any]]:
+    chunks = await db[collection_name].find(
+        {parent_field: parent_id, "kind": kind},
+        {"_id": 0, "items": 1},
+    ).sort("chunk_index", 1).to_list(5000)
+    items: List[Dict[str, Any]] = []
+    for chunk in chunks:
+        items.extend(chunk.get("items", []))
+    return items
+
+
+async def _store_backtest_result_doc(result_doc: Dict[str, Any]):
+    summary_doc = {k: v for k, v in result_doc.items() if k not in {"equity_curve", "trades"}}
+    summary_doc.update({
+        "has_chunked_details": True,
+        "equity_curve_points": len(result_doc.get("equity_curve", [])),
+        "trade_rows": len(result_doc.get("trades", [])),
+    })
+    await db.backtest_results.update_one({"id": summary_doc["id"]}, {"$set": summary_doc}, upsert=True)
+    await _store_chunked_items("backtest_result_chunks", "result_id", summary_doc["id"], "equity_curve", result_doc.get("equity_curve", []), 400)
+    await _store_chunked_items("backtest_result_chunks", "result_id", summary_doc["id"], "trades", result_doc.get("trades", []), 250)
+
+
+async def _load_backtest_result_doc(result_doc: Dict[str, Any]) -> Dict[str, Any]:
+    if not result_doc:
+        return result_doc
+    if result_doc.get("has_chunked_details"):
+        detail = result_doc.copy()
+        detail["equity_curve"] = await _load_chunked_items("backtest_result_chunks", "result_id", result_doc["id"], "equity_curve")
+        detail["trades"] = await _load_chunked_items("backtest_result_chunks", "result_id", result_doc["id"], "trades")
+        return detail
+    return result_doc
+
+
+async def _store_optimizer_result_doc(result_doc: Dict[str, Any]):
+    summary_doc = {k: v for k, v in result_doc.items() if k not in {"results"}}
+    summary_doc.update({
+        "has_chunked_rows": True,
+        "result_rows_count": len(result_doc.get("results", [])),
+    })
+    await db.optimizer_results.update_one({"id": summary_doc["id"]}, {"$set": summary_doc}, upsert=True)
+    await _store_chunked_items("optimizer_result_chunks", "result_id", summary_doc["id"], "results", result_doc.get("results", []), 250)
+
+
+async def _load_optimizer_result_doc(result_doc: Dict[str, Any]) -> Dict[str, Any]:
+    if not result_doc:
+        return result_doc
+    if result_doc.get("has_chunked_rows"):
+        detail = result_doc.copy()
+        detail["results"] = await _load_chunked_items("optimizer_result_chunks", "result_id", result_doc["id"], "results")
+        return detail
+    return result_doc
+
+
+async def _resolve_strategy_runtime_params(strategy_name: str, overrides: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    strategy_doc = await db.strategy_configs.find_one({"name": strategy_name}, {"_id": 0, "parameters": 1})
+    saved_params = (strategy_doc or {}).get("parameters", {})
+    return {**saved_params, **(overrides or {})}
+
+
+def _estimate_candle_count(start_date: str, end_date: str, timeframe: str) -> int:
+    try:
+        start = datetime.fromisoformat(start_date.replace("Z", "+00:00")) if "T" in start_date else datetime.strptime(start_date, "%Y-%m-%d")
+        end = datetime.fromisoformat(end_date.replace("Z", "+00:00")) if "T" in end_date else datetime.strptime(end_date, "%Y-%m-%d")
+        total_seconds = max((end - start).total_seconds(), 1)
+        if timeframe == "day":
+            step_seconds = 24 * 60 * 60
+        elif timeframe.endswith("m"):
+            step_seconds = max(int(timeframe.replace("m", "")), 1) * 60
+        else:
+            step_seconds = 24 * 60 * 60
+        return max(int(total_seconds / step_seconds), 1)
+    except Exception:
+        return 1
+
+
+def _make_progress_callback(async_progress):
+    loop = asyncio.get_running_loop()
+
+    def callback(progress_pct: float, message: str, extra_fields: Optional[Dict[str, Any]] = None):
+        asyncio.run_coroutine_threadsafe(async_progress(progress_pct, message, extra_fields), loop)
+
+    return callback
+
+
+def _build_param_axes(param_ranges: Dict[str, Dict[str, float]]) -> Dict[str, List[float]]:
+    axes: Dict[str, List[float]] = {}
+    for name, rng in param_ranges.items():
+        mn, mx, step = rng["min"], rng["max"], rng["step"]
+        if step <= 0:
+            axes[name] = [mn]
+            continue
+        values = []
+        cursor = mn
+        while cursor <= mx + 1e-9:
+            values.append(round(cursor, 6))
+            cursor += step
+        axes[name] = values
+    return axes
+
+
+def _iter_param_grid(axes: Dict[str, List[float]]):
+    keys = list(axes.keys())
+    for combo in itertools.product(*(axes[key] for key in keys)):
+        yield dict(zip(keys, combo))
+
+
+def _param_grid_size(axes: Dict[str, List[float]]) -> int:
+    if not axes:
+        return 0
+    return math.prod(len(values) for values in axes.values())
+
+
+def _valid_combo(strategy_name: str, params: Dict[str, Any]) -> bool:
+    if strategy_name == "trendshift":
+        ema_fast = params.get("ema_fast")
+        ema_mid = params.get("ema_mid")
+        ema_slow = params.get("ema_slow")
+        if ema_fast is not None and ema_mid is not None and ema_slow is not None and not (ema_fast < ema_mid < ema_slow):
+            return False
+        if params.get("min_confidence") and not (0.35 <= params["min_confidence"] <= 0.95):
+            return False
+        if params.get("ml_min_confidence") and not (0.35 <= params["ml_min_confidence"] <= 0.95):
+            return False
+    return True
+
+
+def _score_optimizer_entry(entry: Dict[str, Any], objective: str) -> float:
+    total_return = entry.get("total_return_pct", 0)
+    win_rate = entry.get("win_rate", 0)
+    drawdown = entry.get("max_drawdown_pct", 0)
+    sharpe = entry.get("sharpe_ratio", 0)
+    profit_factor = entry.get("profit_factor", 0)
+    expectancy = entry.get("expectancy", 0)
+    avg_slippage_bps = entry.get("avg_slippage_bps", 0)
+
+    if objective == "win_rate":
+        return win_rate * 1.4 + sharpe * 8 + total_return * 0.3 - drawdown * 0.8 - avg_slippage_bps * 0.5
+    if objective == "profit":
+        return total_return * 1.1 + sharpe * 6 + expectancy * 0.04 - drawdown * 0.45 - avg_slippage_bps * 0.25
+    if objective == "low_slippage":
+        return total_return * 0.5 + win_rate * 0.7 + sharpe * 6 - drawdown * 0.8 - avg_slippage_bps * 1.2
+    return total_return * 0.7 + win_rate * 0.6 + sharpe * 8 + profit_factor * 4 + expectancy * 0.03 - drawdown * 0.75 - avg_slippage_bps * 0.45
+
+
+def _run_backtest_sync(req: "BacktestRequest", candles: List[Dict[str, Any]], params: Dict[str, Any], progress_callback=None) -> Dict[str, Any]:
+    strategy = get_strategy(req.strategy_name, params or None)
+    engine = BacktestEngine(
+        strategy=strategy,
+        initial_capital=req.initial_capital,
+        quantity=req.quantity,
+        progress_callback=progress_callback,
+    )
+    result = engine.run(candles, symbol=req.symbol, exchange="NSE", timeframe=req.timeframe)
+    return result.model_dump()
+
+
+def _run_optimizer_sync(
+    req: "OptimizerRequest",
+    candles: List[Dict[str, Any]],
+    base_params: Dict[str, Any],
+    total_combinations: int,
+    progress_callback=None,
+) -> Dict[str, Any]:
+    axes = _build_param_axes(req.param_ranges)
+    results: List[Dict[str, Any]] = []
+    best_result: Optional[Dict[str, Any]] = None
+    best_score = -float("inf")
+    processed = 0
+
+    for combo in _iter_param_grid(axes):
+        params = {**base_params, **combo}
+        for key, value in list(params.items()):
+            if isinstance(value, float) and value == int(value):
+                params[key] = int(value)
+        if not _valid_combo(req.strategy_name, params):
+            continue
+
+        processed += 1
+        strategy = get_strategy(req.strategy_name, params)
+        engine = BacktestEngine(
+            strategy=strategy,
+            initial_capital=req.initial_capital,
+            quantity=req.quantity,
+            lightweight=True,
+        )
+        result = engine.run(candles, symbol=req.symbol, exchange="NSE", timeframe=req.timeframe)
+        entry = {
+            "params": combo,
+            "total_return_pct": result.total_return_pct,
+            "total_return": result.total_return,
+            "total_trades": result.total_trades,
+            "win_rate": result.win_rate,
+            "max_drawdown_pct": result.max_drawdown_pct,
+            "sharpe_ratio": result.sharpe_ratio,
+            "profit_factor": result.profit_factor,
+            "expectancy": result.expectancy,
+            "final_capital": result.final_capital,
+            "avg_slippage_bps": result.avg_slippage_bps,
+            "slippage_cost_total": result.slippage_cost_total,
+        }
+        entry["objective_score"] = round(_score_optimizer_entry(entry, req.objective), 4)
+        results.append(entry)
+        if entry["objective_score"] > best_score:
+            best_score = entry["objective_score"]
+            best_result = entry
+
+        # Release references and run GC periodically
+        del engine, strategy, result
+        if processed % 25 == 0:
+            gc.collect()
+
+        if progress_callback and (processed == 1 or processed % max(1, total_combinations // 100) == 0 or processed == total_combinations):
+            progress_callback(
+                100 * processed / max(total_combinations, 1),
+                f"Processed {processed}/{total_combinations} combinations",
+                {"processed_items": processed, "total_items": total_combinations},
+            )
+
+    gc.collect()
+
+    param_names = list(req.param_ranges.keys())
+    heatmap = None
+    if len(param_names) >= 2 and results:
+        x_param, y_param = param_names[0], param_names[1]
+        x_vals = sorted(set(r["params"][x_param] for r in results))
+        y_vals = sorted(set(r["params"][y_param] for r in results))
+        lookup = {(r["params"][x_param], r["params"][y_param]): r for r in results}
+        heatmap = {
+            "x_param": x_param,
+            "y_param": y_param,
+            "x_values": x_vals,
+            "y_values": y_vals,
+            "grid": [
+                [
+                    {
+                        "x": x,
+                        "y": y,
+                        "return_pct": lookup.get((x, y), {}).get("total_return_pct", 0),
+                        "sharpe": lookup.get((x, y), {}).get("sharpe_ratio", 0),
+                        "trades": lookup.get((x, y), {}).get("total_trades", 0),
+                        "win_rate": lookup.get((x, y), {}).get("win_rate", 0),
+                        "drawdown": lookup.get((x, y), {}).get("max_drawdown_pct", 0),
+                        "objective_score": lookup.get((x, y), {}).get("objective_score", 0),
+                    }
+                    for x in x_vals
+                ]
+                for y in y_vals
+            ],
+        }
+
+    results.sort(key=lambda row: row.get("objective_score", row.get("total_return_pct", 0)), reverse=True)
+    return {
+        "id": gen_id(),
+        "strategy_name": req.strategy_name,
+        "symbol": req.symbol,
+        "start_date": req.start_date,
+        "end_date": req.end_date,
+        "initial_capital": req.initial_capital,
+        "quantity": req.quantity,
+        "timeframe": req.timeframe,
+        "param_ranges": req.param_ranges,
+        "fixed_params": req.fixed_params,
+        "objective": req.objective,
+        "total_combinations": total_combinations,
+        "best_params": best_result["params"] if best_result else {},
+        "best_return_pct": best_result.get("total_return_pct", 0) if best_result else 0,
+        "best_result": best_result,
+        "best_objective_score": best_score if best_result else 0,
+        "heatmap": heatmap,
+        "results": results,
+        "created_at": now_utc(),
+    }
+
+
+async def _process_backtest_job(job_id: str, payload: Dict[str, Any], progress):
+    req = BacktestRequest(**payload)
+    params = await _resolve_strategy_runtime_params(req.strategy_name, req.parameters)
+    candles = await paper_broker.get_historical_data(req.symbol, "NSE", req.timeframe, req.start_date, req.end_date)
+    progress_callback = _make_progress_callback(progress)
+    result_doc = await asyncio.to_thread(_run_backtest_sync, req, candles, params, progress_callback)
+    await _store_backtest_result_doc(result_doc)
+    return {
+        "kind": "backtest",
+        "result_id": result_doc["id"],
+        "summary": {
+            "strategy_name": result_doc["strategy_name"],
+            "symbol": result_doc["symbol"],
+            "total_return_pct": result_doc["total_return_pct"],
+            "win_rate": result_doc["win_rate"],
+            "total_trades": result_doc["total_trades"],
+        },
+    }
+
+
+async def _process_optimizer_job(job_id: str, payload: Dict[str, Any], progress):
+    req = OptimizerRequest(**payload)
+    axes = _build_param_axes(req.param_ranges)
+    total_combinations = sum(1 for combo in _iter_param_grid(axes) if _valid_combo(req.strategy_name, {**req.fixed_params, **combo}))
+    base_params = await _resolve_strategy_runtime_params(req.strategy_name, req.fixed_params)
+    candles = await paper_broker.get_historical_data(req.symbol, "NSE", req.timeframe, req.start_date, req.end_date)
+    progress_callback = _make_progress_callback(progress)
+    result_doc = await asyncio.to_thread(_run_optimizer_sync, req, candles, base_params, total_combinations, progress_callback)
+    await _store_optimizer_result_doc(result_doc)
+    return {
+        "kind": "optimizer",
+        "result_id": result_doc["id"],
+        "summary": {
+            "strategy_name": result_doc["strategy_name"],
+            "symbol": result_doc["symbol"],
+            "best_return_pct": result_doc["best_return_pct"],
+            "objective": result_doc["objective"],
+            "best_objective_score": result_doc.get("best_objective_score", 0),
+        },
+    }
 
 
 async def _get_settings_doc() -> Dict[str, Any]:
@@ -170,16 +513,10 @@ def _serialize_chart_indicators(indicators: Dict[str, Any], max_points: int = 18
 
 def _generate_trendshift_signals(candles: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     strategy = TrendShiftStrategy()
-    warmup_size = getattr(strategy, "_warmup_period", 20)
-    if len(candles) <= warmup_size:
-        return []
-
-    strategy.warmup(candles[:warmup_size])
+    signal_map = strategy.batch_generate_signals(candles, symbol=candles[-1].get("symbol", "") if candles else "", exchange="NSE")
     signals: List[Dict[str, Any]] = []
-    for index, candle in enumerate(candles[warmup_size:], start=warmup_size):
-        signal = strategy.on_candle(candle)
-        if signal:
-            signals.append({**signal.model_dump(), "index": index})
+    for index, signal in signal_map.items():
+        signals.append({**signal.model_dump(), "index": index})
     return signals[-12:]
 
 
@@ -401,47 +738,50 @@ async def _generate_demo_signals(strategy_name: str, symbols: List[str]):
             if not candles:
                 continue
             strategy.reset()
-            warmup_size = getattr(strategy, '_warmup_period', 20)
-            if len(candles) > warmup_size:
-                strategy.warmup(candles[:warmup_size])
-                for candle in candles[warmup_size:]:
-                    candle["symbol"] = symbol
-                    candle["exchange"] = "NSE"
-                    signal = strategy.on_candle(candle)
-                    if signal:
-                        sig_doc = signal.model_dump()
-                        await db.signals.insert_one(sig_doc)
+            batch_generator = getattr(strategy, "batch_generate_signals", None)
+            if callable(batch_generator):
+                signal_map = batch_generator(candles, symbol=symbol, exchange="NSE")
+                generated_signals = [(candles[index], signal) for index, signal in signal_map.items()]
+            else:
+                warmup_size = getattr(strategy, '_warmup_period', 20)
+                generated_signals = []
+                if len(candles) > warmup_size:
+                    strategy.warmup(candles[:warmup_size])
+                    for candle in candles[warmup_size:]:
+                        candle["symbol"] = symbol
+                        candle["exchange"] = "NSE"
+                        signal = strategy.on_candle(candle)
+                        if signal:
+                            generated_signals.append((candle, signal))
+            for candle, signal in generated_signals:
+                sig_doc = signal.model_dump()
+                await db.signals.insert_one(sig_doc)
 
-                        # Execute through paper broker
-                        result = await order_manager.execute_signal(signal)
-                        if result.get("success"):
-                            order_doc = result["order"]
-                            await db.orders.insert_one(order_doc)
+                result = await order_manager.execute_signal(signal)
+                if result.get("success"):
+                    order_doc = result["order"]
+                    await db.orders.insert_one(order_doc)
 
-                            fill_price = order_doc.get("filled_price") or signal.price or candle["close"]
-                            if fill_price is None:
-                                fill_price = candle["close"]
-                            trade = trade_engine.open_trade(
-                                Order(**order_doc), fill_price, strategy_name
-                            )
-                            # Close trade with small profit/loss for demo
-                            import random
-                            exit_mult = 1 + random.uniform(-0.02, 0.03)
-                            exit_price = round(fill_price * exit_mult, 2)
-                            closed = trade_engine.close_trade(trade.id, exit_price)
-                            if closed:
-                                await db.trades.insert_one(closed.model_dump())
-                                # Create position record
-                                pos = Position(
-                                    symbol=symbol, exchange="NSE", side=signal.side,
-                                    quantity=signal.quantity, avg_price=fill_price,
-                                    current_price=exit_price,
-                                    realized_pnl=closed.net_pnl,
-                                    status=PositionStatus.CLOSED,
-                                    strategy_name=strategy_name,
-                                    trading_mode=TradingMode.PAPER,
-                                )
-                                await db.positions.insert_one(pos.model_dump())
+                    fill_price = order_doc.get("filled_price") or signal.price or candle["close"]
+                    if fill_price is None:
+                        fill_price = candle["close"]
+                    trade = trade_engine.open_trade(Order(**order_doc), fill_price, strategy_name)
+                    import random
+                    exit_mult = 1 + random.uniform(-0.02, 0.03)
+                    exit_price = round(fill_price * exit_mult, 2)
+                    closed = trade_engine.close_trade(trade.id, exit_price)
+                    if closed:
+                        await db.trades.insert_one(closed.model_dump())
+                        pos = Position(
+                            symbol=symbol, exchange="NSE", side=signal.side,
+                            quantity=signal.quantity, avg_price=fill_price,
+                            current_price=exit_price,
+                            realized_pnl=closed.net_pnl,
+                            status=PositionStatus.CLOSED,
+                            strategy_name=strategy_name,
+                            trading_mode=TradingMode.PAPER,
+                        )
+                        await db.positions.insert_one(pos.model_dump())
         logger.info(f"Demo signals generated for {symbols}")
     except Exception as e:
         logger.error(f"Error generating demo signals: {e}")
@@ -474,17 +814,25 @@ async def generate_signals_manual(strategy_name: str = "sma_crossover", symbol: 
         candles = await paper_broker.get_historical_data(symbol, "NSE", "day", "2025-01-01", "2025-12-01")
         strategy.reset()
         signals_generated = []
-        warmup_size = getattr(strategy, '_warmup_period', 20)
-        if len(candles) > warmup_size:
-            strategy.warmup(candles[:warmup_size])
-            for candle in candles[warmup_size:]:
-                candle["symbol"] = symbol
-                candle["exchange"] = "NSE"
-                signal = strategy.on_candle(candle)
-                if signal:
-                    sig_doc = signal.model_dump()
-                    signals_generated.append(sig_doc.copy())
-                    await db.signals.insert_one(sig_doc)
+        batch_generator = getattr(strategy, "batch_generate_signals", None)
+        if callable(batch_generator):
+            signal_map = batch_generator(candles, symbol=symbol, exchange="NSE")
+            for _, signal in signal_map.items():
+                sig_doc = signal.model_dump()
+                signals_generated.append(sig_doc.copy())
+                await db.signals.insert_one(sig_doc)
+        else:
+            warmup_size = getattr(strategy, '_warmup_period', 20)
+            if len(candles) > warmup_size:
+                strategy.warmup(candles[:warmup_size])
+                for candle in candles[warmup_size:]:
+                    candle["symbol"] = symbol
+                    candle["exchange"] = "NSE"
+                    signal = strategy.on_candle(candle)
+                    if signal:
+                        sig_doc = signal.model_dump()
+                        signals_generated.append(sig_doc.copy())
+                        await db.signals.insert_one(sig_doc)
         return {"count": len(signals_generated), "signals": signals_generated[:10]}
     except Exception as e:
         raise HTTPException(500, str(e))
@@ -577,6 +925,35 @@ async def update_strategy_config(name: str, config: Dict[str, Any]):
         {"name": name}, {"$set": config}, upsert=True
     )
     return {"status": "updated", "name": name}
+
+
+@api_router.post("/strategies/{name}/defaults")
+async def save_strategy_defaults(name: str, payload: Dict[str, Any]):
+    if name not in STRATEGY_REGISTRY:
+        raise HTTPException(404, f"Strategy '{name}' not found")
+    parameters = payload.get("parameters") or {}
+    existing = await db.strategy_configs.find_one({"name": name}, {"_id": 0})
+    merged = {
+        **(existing or {}),
+        "name": name,
+        "parameters": parameters,
+        "updated_at": now_utc(),
+    }
+    await db.strategy_configs.update_one({"name": name}, {"$set": merged}, upsert=True)
+    return {"status": "updated", "name": name, "parameters": parameters}
+
+
+@api_router.get("/jobs")
+async def list_analysis_jobs(kind: Optional[str] = None, limit: int = Query(20, le=100)):
+    return await job_queue.list_jobs(kind=kind, limit=limit)
+
+
+@api_router.get("/jobs/{job_id}")
+async def get_analysis_job(job_id: str):
+    job = await job_queue.get_job(job_id)
+    if not job:
+        raise HTTPException(404, "Job not found")
+    return job
 
 
 # ==================== RISK CONTROLS ====================
@@ -697,6 +1074,7 @@ async def export_optimizer_csv(result_id: str):
     result = await db.optimizer_results.find_one({"id": result_id}, {"_id": 0})
     if not result:
         raise HTTPException(404, "Optimizer result not found")
+    result = await _load_optimizer_result_doc(result)
     output = io.StringIO()
     rows = result.get("results", [])
     if not rows:
@@ -1000,26 +1378,40 @@ class BacktestRequest(BaseModel):
     quantity: int = 10
     timeframe: str = "day"
     parameters: Dict[str, Any] = Field(default_factory=dict)
+    execution_mode: str = "auto"
 
 @api_router.post("/backtest/run")
 async def run_backtest(req: BacktestRequest):
     try:
-        params = req.parameters or None
-        strategy = get_strategy(req.strategy_name, params)
         candles = await paper_broker.get_historical_data(
             req.symbol, "NSE", req.timeframe, req.start_date, req.end_date
         )
         if not candles:
             raise HTTPException(400, "No candle data generated")
 
-        engine = BacktestEngine(
-            strategy=strategy,
-            initial_capital=req.initial_capital,
-            quantity=req.quantity,
+        estimated_candles = len(candles)
+        should_queue = req.execution_mode == "queue" or (
+            req.execution_mode == "auto" and (estimated_candles > 1500 or req.timeframe != "day")
         )
-        result = engine.run(candles, symbol=req.symbol, exchange="NSE")
-        result_doc = result.model_dump()
-        await db.backtest_results.insert_one(result_doc.copy())
+        if should_queue:
+            job = await job_queue.enqueue(
+                "backtest",
+                req.model_dump(),
+                meta={"symbol": req.symbol, "strategy_name": req.strategy_name, "estimated_candles": estimated_candles},
+            )
+            return JSONResponse(
+                {
+                    "status": "queued",
+                    "job_id": job["id"],
+                    "estimated_candles": estimated_candles,
+                    "message": "Backtest queued for reliable processing",
+                },
+                status_code=202,
+            )
+
+        params = await _resolve_strategy_runtime_params(req.strategy_name, req.parameters)
+        result_doc = await asyncio.to_thread(_run_backtest_sync, req, candles, params)
+        await _store_backtest_result_doc(result_doc)
         return result_doc
     except ValueError as e:
         raise HTTPException(400, str(e))
@@ -1039,7 +1431,7 @@ async def get_backtest_detail(result_id: str):
     result = await db.backtest_results.find_one({"id": result_id}, {"_id": 0})
     if not result:
         raise HTTPException(404, "Backtest result not found")
-    return result
+    return await _load_backtest_result_doc(result)
 
 
 # ==================== OPTIMIZER ====================
@@ -1063,171 +1455,55 @@ class OptimizerRequest(BaseModel):
         }
     )
     fixed_params: Dict[str, Any] = Field(default_factory=dict)
-
-import itertools
-import numpy as np
-
-def _generate_param_grid(param_ranges: Dict[str, Dict[str, float]]) -> List[Dict[str, Any]]:
-    """Generate all parameter combinations from ranges."""
-    axes = {}
-    for name, rng in param_ranges.items():
-        mn, mx, step = rng["min"], rng["max"], rng["step"]
-        if step <= 0:
-            axes[name] = [mn]
-        else:
-            vals = []
-            v = mn
-            while v <= mx + 1e-9:
-                vals.append(round(v, 6))
-                v += step
-            axes[name] = vals
-    keys = list(axes.keys())
-    combos = list(itertools.product(*(axes[k] for k in keys)))
-    return [dict(zip(keys, combo)) for combo in combos], axes
+    objective: str = "balanced"
+    execution_mode: str = "auto"
 
 @api_router.post("/optimizer/run")
 async def run_optimizer(req: OptimizerRequest):
-    """Run backtest grid search across parameter ranges. Returns heatmap data."""
+    """Run backtest grid search across parameter ranges."""
     try:
         if req.strategy_name not in STRATEGY_REGISTRY:
             raise HTTPException(400, f"Unknown strategy: {req.strategy_name}")
 
-        combos, axes = _generate_param_grid(req.param_ranges)
-        if len(combos) > 2500:
-            raise HTTPException(400, f"Too many combinations ({len(combos)}). Max 2500. Increase step sizes.")
-        if len(combos) == 0:
+        axes = _build_param_axes(req.param_ranges)
+        total_combinations = _param_grid_size(axes)
+        if total_combinations == 0:
             raise HTTPException(400, "No parameter combinations generated. Check ranges.")
+        if total_combinations > 2000:
+            raise HTTPException(400, f"Too many parameter combinations ({total_combinations}). Max is 2000. Narrow your ranges or increase step size.")
 
-        # Generate candle data once
         candles = await paper_broker.get_historical_data(
             req.symbol, "NSE", req.timeframe, req.start_date, req.end_date
         )
         if not candles or len(candles) < 30:
             raise HTTPException(400, "Insufficient candle data for optimization")
 
-        grid_results = []
-        best_result = None
-        best_return = -float("inf")
+        valid_combinations = sum(1 for combo in _iter_param_grid(axes) if _valid_combo(req.strategy_name, {**req.fixed_params, **combo}))
+        if valid_combinations > 2000:
+            raise HTTPException(400, f"Too many valid combinations ({valid_combinations}). Max is 2000. Narrow your ranges or increase step size.")
 
-        for combo in combos:
-            params = {**req.fixed_params, **combo}
-            # Convert float params that should be int (periods etc.)
-            for k, v in params.items():
-                if isinstance(v, float) and v == int(v):
-                    params[k] = int(v)
+        should_queue = req.execution_mode == "queue" or (
+            req.execution_mode == "auto" and (valid_combinations > 80 or len(candles) > 1200 or valid_combinations * len(candles) > 100000)
+        )
+        if should_queue:
+            job = await job_queue.enqueue(
+                "optimizer",
+                req.model_dump(),
+                meta={"symbol": req.symbol, "strategy_name": req.strategy_name, "total_combinations": valid_combinations, "objective": req.objective},
+            )
+            return JSONResponse(
+                {
+                    "status": "queued",
+                    "job_id": job["id"],
+                    "total_combinations": valid_combinations,
+                    "message": "Optimizer queued for reliable processing",
+                },
+                status_code=202,
+            )
 
-            try:
-                strategy = get_strategy(req.strategy_name, params)
-                engine = BacktestEngine(
-                    strategy=strategy,
-                    initial_capital=req.initial_capital,
-                    quantity=req.quantity,
-                )
-                result = engine.run(candles, symbol=req.symbol, exchange="NSE")
-                entry = {
-                    "params": combo,
-                    "total_return_pct": result.total_return_pct,
-                    "total_return": result.total_return,
-                    "total_trades": result.total_trades,
-                    "win_rate": result.win_rate,
-                    "max_drawdown_pct": result.max_drawdown_pct,
-                    "sharpe_ratio": result.sharpe_ratio,
-                    "profit_factor": result.profit_factor,
-                    "expectancy": result.expectancy,
-                    "final_capital": result.final_capital,
-                }
-                grid_results.append(entry)
-                if result.total_return_pct > best_return:
-                    best_return = result.total_return_pct
-                    best_result = entry
-            except Exception as e:
-                grid_results.append({
-                    "params": combo,
-                    "total_return_pct": 0,
-                    "total_return": 0,
-                    "total_trades": 0,
-                    "win_rate": 0,
-                    "max_drawdown_pct": 0,
-                    "sharpe_ratio": 0,
-                    "profit_factor": 0,
-                    "expectancy": 0,
-                    "final_capital": req.initial_capital,
-                    "error": str(e),
-                })
-
-        # Build heatmap data: pick first 2 param names as axes
-        param_names = list(req.param_ranges.keys())
-        heatmap = None
-        if len(param_names) >= 2:
-            x_param, y_param = param_names[0], param_names[1]
-            x_vals = sorted(set(r["params"][x_param] for r in grid_results))
-            y_vals = sorted(set(r["params"][y_param] for r in grid_results))
-            lookup = {}
-            for r in grid_results:
-                key = (r["params"][x_param], r["params"][y_param])
-                lookup[key] = r
-            heatmap_grid = []
-            for y in y_vals:
-                row = []
-                for x in x_vals:
-                    entry = lookup.get((x, y))
-                    row.append({
-                        "x": x, "y": y,
-                        "return_pct": entry["total_return_pct"] if entry else 0,
-                        "sharpe": entry["sharpe_ratio"] if entry else 0,
-                        "trades": entry["total_trades"] if entry else 0,
-                        "win_rate": entry["win_rate"] if entry else 0,
-                        "drawdown": entry["max_drawdown_pct"] if entry else 0,
-                    })
-                heatmap_grid.append(row)
-            heatmap = {
-                "x_param": x_param,
-                "y_param": y_param,
-                "x_values": x_vals,
-                "y_values": y_vals,
-                "grid": heatmap_grid,
-            }
-        elif len(param_names) == 1:
-            # 1D scan - still return as heatmap with single row
-            x_param = param_names[0]
-            x_vals = sorted(set(r["params"][x_param] for r in grid_results))
-            heatmap = {
-                "x_param": x_param,
-                "y_param": None,
-                "x_values": x_vals,
-                "y_values": [0],
-                "grid": [[{
-                    "x": r["params"][x_param], "y": 0,
-                    "return_pct": r["total_return_pct"],
-                    "sharpe": r["sharpe_ratio"],
-                    "trades": r["total_trades"],
-                    "win_rate": r["win_rate"],
-                    "drawdown": r["max_drawdown_pct"],
-                } for r in sorted(grid_results, key=lambda r: r["params"][x_param])]],
-            }
-
-        # Sort results by return descending
-        grid_results.sort(key=lambda r: r["total_return_pct"], reverse=True)
-
-        opt_result = {
-            "id": gen_id(),
-            "strategy_name": req.strategy_name,
-            "symbol": req.symbol,
-            "start_date": req.start_date,
-            "end_date": req.end_date,
-            "initial_capital": req.initial_capital,
-            "quantity": req.quantity,
-            "param_ranges": req.param_ranges,
-            "fixed_params": req.fixed_params,
-            "total_combinations": len(combos),
-            "best_params": best_result["params"] if best_result else {},
-            "best_return_pct": best_return,
-            "best_result": best_result,
-            "heatmap": heatmap,
-            "results": grid_results,
-            "created_at": now_utc(),
-        }
-        await db.optimizer_results.insert_one(opt_result.copy())
+        base_params = await _resolve_strategy_runtime_params(req.strategy_name, req.fixed_params)
+        opt_result = await asyncio.to_thread(_run_optimizer_sync, req, candles, base_params, valid_combinations)
+        await _store_optimizer_result_doc(opt_result)
         return opt_result
     except HTTPException:
         raise
@@ -1239,7 +1515,7 @@ async def run_optimizer(req: OptimizerRequest):
 @api_router.get("/optimizer/results")
 async def get_optimizer_results(limit: int = Query(20, le=50)):
     results = await db.optimizer_results.find(
-        {}, {"_id": 0, "results": 0, "heatmap": 0}
+        {}, {"_id": 0, "results": 0}
     ).sort("created_at", -1).to_list(limit)
     return results
 
@@ -1249,7 +1525,17 @@ async def get_optimizer_detail(result_id: str):
     result = await db.optimizer_results.find_one({"id": result_id}, {"_id": 0})
     if not result:
         raise HTTPException(404, "Optimizer result not found")
-    return result
+    return await _load_optimizer_result_doc(result)
+
+
+@api_router.post("/optimizer/results/{result_id}/apply-defaults")
+async def apply_optimizer_result_defaults(result_id: str):
+    result = await db.optimizer_results.find_one({"id": result_id}, {"_id": 0, "strategy_name": 1, "best_params": 1})
+    if not result:
+        raise HTTPException(404, "Optimizer result not found")
+    if not result.get("best_params"):
+        raise HTTPException(400, "Optimizer result does not contain best params")
+    return await save_strategy_defaults(result["strategy_name"], {"parameters": result["best_params"]})
 
 
 # ==================== SETTINGS ====================
@@ -1416,6 +1702,9 @@ async def startup():
     try:
         await db.command("ping")
         logger.info("MongoDB connected")
+        job_queue.register_processor("backtest", _process_backtest_job)
+        job_queue.register_processor("optimizer", _process_optimizer_job)
+        await job_queue.start()
         # Auto-init if empty
         count = await db.settings.count_documents({})
         if count == 0:
@@ -1438,4 +1727,5 @@ async def startup():
 
 @app.on_event("shutdown")
 async def shutdown_db_client():
+    await job_queue.shutdown()
     client.close()

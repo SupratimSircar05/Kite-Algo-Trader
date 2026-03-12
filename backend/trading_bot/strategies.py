@@ -35,7 +35,7 @@ class StrategyBase(ABC):
             self._candle_buffer.append(c)
         if len(self._candle_buffer) >= self._warmup_period:
             self._warmup_complete = True
-        logger.info(f"{self.name}: warmed up with {len(candles)} candles (buffer={len(self._candle_buffer)})")
+        logger.debug(f"{self.name}: warmed up with {len(candles)} candles (buffer={len(self._candle_buffer)})")
 
     def on_tick(self, tick: Dict[str, Any]) -> Optional[Signal]:
         """Process a live tick. Override if needed. Default: no-op."""

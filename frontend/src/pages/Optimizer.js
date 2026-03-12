@@ -3,7 +3,7 @@ import axios from "axios";
 import { toast } from "sonner";
 import {
   Grid3x3, Play, Clock, Trophy, TrendingUp, TrendingDown,
-  ChevronDown, ChevronUp, Info, Crosshair, Layers
+  ChevronDown, ChevronUp, Info, Crosshair, Layers, Activity, Save, History
 } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -12,6 +12,7 @@ import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
+import { Progress } from "@/components/ui/progress";
 
 const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
 
@@ -29,6 +30,28 @@ const DEFAULT_RANGES = {
     ema_mid: { min: 13, max: 34, step: 3 },
     ema_slow: { min: 34, max: 89, step: 5 },
     supertrend_mult: { min: 2, max: 4, step: 0.5 },
+    min_confidence: { min: 0.55, max: 0.75, step: 0.05 },
+    ml_min_confidence: { min: 0.5, max: 0.7, step: 0.05 },
+  },
+};
+
+const TRENDSHIFT_PRESETS = {
+  safe: {
+    ema_fast: { min: 6, max: 10, step: 2 },
+    ema_mid: { min: 18, max: 28, step: 5 },
+    ema_slow: { min: 50, max: 70, step: 10 },
+    supertrend_mult: { min: 2.4, max: 3.0, step: 0.3 },
+    min_confidence: { min: 0.62, max: 0.74, step: 0.06 },
+    ml_min_confidence: { min: 0.56, max: 0.68, step: 0.06 },
+  },
+  balanced: DEFAULT_RANGES.trendshift,
+  deep: {
+    ema_fast: { min: 5, max: 15, step: 1 },
+    ema_mid: { min: 13, max: 34, step: 3 },
+    ema_slow: { min: 34, max: 89, step: 5 },
+    supertrend_mult: { min: 2.0, max: 4.0, step: 0.25 },
+    min_confidence: { min: 0.5, max: 0.8, step: 0.05 },
+    ml_min_confidence: { min: 0.45, max: 0.75, step: 0.05 },
   },
 };
 
@@ -40,6 +63,10 @@ export default function Optimizer() {
   const [progress, setProgress] = useState("");
   const [heatmapMetric, setHeatmapMetric] = useState("return_pct");
   const [expandedRow, setExpandedRow] = useState(null);
+  const [activeJob, setActiveJob] = useState(null);
+  const [recentJobs, setRecentJobs] = useState([]);
+  const [savingDefaults, setSavingDefaults] = useState(false);
+  const [preset, setPreset] = useState("balanced");
 
   const [form, setForm] = useState({
     strategy_name: "sma_crossover",
@@ -48,17 +75,72 @@ export default function Optimizer() {
     end_date: "2025-06-01",
     initial_capital: 100000,
     quantity: 10,
+    objective: "balanced",
+    use_ml_filter: true,
   });
   const [paramRanges, setParamRanges] = useState(DEFAULT_RANGES.sma_crossover);
+
+  const fetchJobs = useCallback(async () => {
+    try {
+      const res = await axios.get(`${API}/jobs`, { params: { kind: "optimizer", limit: 8 } });
+      setRecentJobs(res.data);
+    } catch (e) {
+      console.error(e);
+    }
+  }, []);
 
   useEffect(() => {
     axios.get(`${API}/strategies`).then(r => setStrategies(r.data)).catch(() => {});
     axios.get(`${API}/optimizer/results`).then(r => setPastResults(r.data)).catch(() => {});
-  }, []);
+    fetchJobs();
+    const savedJobId = window.localStorage.getItem("kitealgo-optimizer-job-id");
+    if (savedJobId) {
+      axios.get(`${API}/jobs/${savedJobId}`).then((res) => setActiveJob(res.data)).catch(() => {
+        window.localStorage.removeItem("kitealgo-optimizer-job-id");
+      });
+    }
+  }, [fetchJobs]);
+
+  useEffect(() => {
+    if (!activeJob?.id || ["completed", "failed", "cancelled"].includes(activeJob.status)) return undefined;
+    const timer = window.setInterval(async () => {
+      try {
+        const res = await axios.get(`${API}/jobs/${activeJob.id}`);
+        const job = res.data;
+        setActiveJob(job);
+        if (job.status === "completed") {
+          window.localStorage.removeItem("kitealgo-optimizer-job-id");
+          if (job.result?.result_id) {
+            const detail = await axios.get(`${API}/optimizer/results/${job.result.result_id}`);
+            setResult(detail.data);
+            setExpandedRow(null);
+            toast.success("Optimizer run completed successfully");
+            axios.get(`${API}/optimizer/results`).then(r => setPastResults(r.data)).catch(() => {});
+            fetchJobs();
+          }
+        }
+        if (job.status === "failed") {
+          window.localStorage.removeItem("kitealgo-optimizer-job-id");
+          toast.error(job.error || "Optimizer job failed");
+          fetchJobs();
+        }
+      } catch (e) {
+        console.error(e);
+      }
+    }, 2000);
+    return () => window.clearInterval(timer);
+  }, [activeJob, fetchJobs]);
 
   const onStrategyChange = (name) => {
     setForm(f => ({ ...f, strategy_name: name }));
-    setParamRanges(DEFAULT_RANGES[name] || {});
+    setParamRanges(name === "trendshift" ? TRENDSHIFT_PRESETS[preset] : (DEFAULT_RANGES[name] || {}));
+  };
+
+  const applyPreset = (value) => {
+    setPreset(value);
+    if (form.strategy_name === "trendshift") {
+      setParamRanges(TRENDSHIFT_PRESETS[value]);
+    }
   };
 
   const updateRange = (param, field, value) => {
@@ -94,21 +176,26 @@ export default function Optimizer() {
   }, [paramRanges]);
 
   const runOptimizer = async () => {
-    if (totalCombos > 2500) {
-      toast.error(`Too many combinations (${totalCombos}). Max 2500. Increase step sizes.`);
-      return;
-    }
     setRunning(true);
-    setProgress(`Running ${totalCombos} backtests...`);
+    setProgress(`Queueing ${totalCombos} combinations...`);
     try {
+      const fixed_params = form.strategy_name === "trendshift" ? { use_ml_filter: form.use_ml_filter } : {};
       const res = await axios.post(`${API}/optimizer/run`, {
         ...form,
         param_ranges: paramRanges,
-        fixed_params: {},
+        fixed_params,
+        execution_mode: "queue",
       });
-      setResult(res.data);
-      toast.success(`Optimization complete: ${res.data.total_combinations} combinations tested`);
-      axios.get(`${API}/optimizer/results`).then(r => setPastResults(r.data)).catch(() => {});
+      if (res.data.status === "queued") {
+        setActiveJob({ id: res.data.job_id, status: "queued", progress_pct: 0, message: res.data.message });
+        window.localStorage.setItem("kitealgo-optimizer-job-id", res.data.job_id);
+        toast.info(`Optimizer queued for ${res.data.total_combinations} valid combinations`);
+        fetchJobs();
+      } else {
+        setResult(res.data);
+        toast.success(`Optimization complete: ${res.data.total_combinations} combinations tested`);
+        axios.get(`${API}/optimizer/results`).then(r => setPastResults(r.data)).catch(() => {});
+      }
     } catch (e) {
       toast.error(e.response?.data?.detail || "Optimization failed");
     } finally {
@@ -127,6 +214,31 @@ export default function Optimizer() {
     }
   };
 
+  const applyBestDefaults = async () => {
+    if (!result?.id) return;
+    setSavingDefaults(true);
+    try {
+      await axios.post(`${API}/optimizer/results/${result.id}/apply-defaults`);
+      toast.success("Best parameters saved as strategy defaults");
+    } catch (e) {
+      toast.error(e.response?.data?.detail || "Failed to save defaults");
+    } finally {
+      setSavingDefaults(false);
+    }
+  };
+
+  const loadJobResult = async (job) => {
+    if (!job?.result?.result_id) return;
+    try {
+      const res = await axios.get(`${API}/optimizer/results/${job.result.result_id}`);
+      setResult(res.data);
+      setExpandedRow(null);
+      toast.info("Loaded queued optimization result");
+    } catch (e) {
+      toast.error("Failed to load queued optimization result");
+    }
+  };
+
   return (
     <TooltipProvider delayDuration={150}>
       <div data-testid="optimizer-page" className="p-4 md:p-6 space-y-4">
@@ -137,10 +249,31 @@ export default function Optimizer() {
               <Grid3x3 className="w-5 h-5 text-amber-500" /> Strategy Optimizer
             </h1>
             <p className="text-xs text-zinc-500 font-mono mt-0.5">
-              Grid search across parameter ranges with heatmap visualization
+              Queue large searches safely, monitor progress, then save best parameters as defaults
             </p>
           </div>
         </div>
+
+        {activeJob && (
+          <Card data-testid="optimizer-job-card" className="bg-amber-950/20 border-amber-800/50 rounded-sm">
+            <CardContent className="p-4 space-y-3">
+              <div className="flex flex-col gap-2 lg:flex-row lg:items-center lg:justify-between">
+                <div>
+                  <div className="flex items-center gap-2 text-sm font-medium text-white">
+                    <Activity className="h-4 w-4 text-amber-400" /> Optimizer Queue Status
+                  </div>
+                  <div data-testid="optimizer-job-message" className="mt-1 text-xs font-mono text-zinc-400">
+                    {activeJob.message || "Queued"}
+                  </div>
+                </div>
+                <div data-testid="optimizer-job-state" className="text-xs font-mono text-amber-300">
+                  {activeJob.status?.toUpperCase()} · {(activeJob.progress_pct || 0).toFixed(0)}%
+                </div>
+              </div>
+              <Progress data-testid="optimizer-job-progress" value={activeJob.progress_pct || 0} className="h-2 bg-amber-950/40 [&>div]:bg-amber-500" />
+            </CardContent>
+          </Card>
+        )}
 
         {/* Config Panel */}
         <Card className="bg-zinc-900 border-zinc-800 rounded-sm">
@@ -194,6 +327,55 @@ export default function Optimizer() {
                 <label className="text-[10px] uppercase tracking-wider text-zinc-500 block mb-1">Quantity</label>
                 <Input data-testid="opt-quantity" type="number" value={form.quantity} onChange={(e) => setForm(f => ({ ...f, quantity: Number(e.target.value) }))} className="h-8 text-xs bg-zinc-800 border-zinc-700 font-mono" />
               </div>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+              <div>
+                <label className="text-[10px] uppercase tracking-wider text-zinc-500 block mb-1">Optimization Objective</label>
+                <Select value={form.objective} onValueChange={(value) => setForm((f) => ({ ...f, objective: value }))}>
+                  <SelectTrigger data-testid="opt-objective-select" className="h-8 text-xs bg-zinc-800 border-zinc-700">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="balanced">Balanced Score</SelectItem>
+                    <SelectItem value="profit">Profit First</SelectItem>
+                    <SelectItem value="win_rate">Win Rate Focus</SelectItem>
+                    <SelectItem value="low_slippage">Low Slippage Focus</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+              {form.strategy_name === "trendshift" && (
+                <div>
+                  <label className="text-[10px] uppercase tracking-wider text-zinc-500 block mb-1">TrendShift Preset</label>
+                  <Select value={preset} onValueChange={applyPreset}>
+                    <SelectTrigger data-testid="opt-trendshift-preset-select" className="h-8 text-xs bg-zinc-800 border-zinc-700">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="safe">Safe Search</SelectItem>
+                      <SelectItem value="balanced">Balanced Search</SelectItem>
+                      <SelectItem value="deep">Deep Search</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+              )}
+              <div className="rounded-sm border border-zinc-800 bg-zinc-950/60 px-3 py-2 text-xs font-mono text-zinc-400 flex items-center justify-between">
+                <span>Estimated combinations</span>
+                <span data-testid="optimizer-combo-estimate" className="text-white">{totalCombos}</span>
+              </div>
+              {form.strategy_name === "trendshift" && (
+                <div className="rounded-sm border border-zinc-800 bg-zinc-950/60 px-3 py-2 text-xs flex items-center gap-2">
+                  <label data-testid="opt-ml-filter-toggle" className="flex items-center gap-2 cursor-pointer select-none">
+                    <input
+                      type="checkbox"
+                      checked={form.use_ml_filter}
+                      onChange={(e) => setForm(f => ({...f, use_ml_filter: e.target.checked}))}
+                      className="w-3.5 h-3.5 rounded-sm bg-zinc-800 border-zinc-600 accent-amber-500"
+                    />
+                    <span className="text-zinc-400">ML Regime Filter</span>
+                  </label>
+                </div>
+              )}
             </div>
 
             {/* Parameter Ranges */}
@@ -271,11 +453,11 @@ export default function Optimizer() {
                 className="h-9 px-6 rounded-sm bg-amber-600 hover:bg-amber-500 text-black font-semibold text-xs gap-1.5"
               >
                 {running ? <Clock className="w-3.5 h-3.5 animate-spin" /> : <Play className="w-3.5 h-3.5" />}
-                {running ? progress : `Run Optimizer (${totalCombos} combos)`}
+                {running ? progress : `Queue Optimizer (${totalCombos} combos)`}
               </Button>
               {totalCombos > 500 && (
                 <span className="text-[10px] text-amber-500 font-mono flex items-center gap-1">
-                  <Info className="w-3 h-3" /> Large grid - may take a moment
+                  <Info className="w-3 h-3" /> Large grid automatically runs in the reliable queue
                 </span>
               )}
             </div>
@@ -307,8 +489,16 @@ export default function Optimizer() {
                     <div className={`text-xl font-mono font-bold ${result.best_return_pct >= 0 ? "text-profit" : "text-loss"}`}>
                       {result.best_return_pct >= 0 ? "+" : ""}{result.best_return_pct?.toFixed(2)}%
                     </div>
-                    <div className="text-[10px] text-zinc-500 font-mono">{result.total_combinations} tested</div>
+                    <div className="text-[10px] text-zinc-500 font-mono">{result.total_combinations} tested · {result.objective}</div>
                   </div>
+                  <Button
+                    data-testid="optimizer-save-defaults-button"
+                    onClick={applyBestDefaults}
+                    disabled={savingDefaults}
+                    className="rounded-sm bg-emerald-600 hover:bg-emerald-500 text-xs gap-1.5"
+                  >
+                    <Save className="w-3.5 h-3.5" /> {savingDefaults ? "Saving..." : "Save as Defaults"}
+                  </Button>
                 </div>
               </CardContent>
             </Card>
@@ -380,6 +570,50 @@ export default function Optimizer() {
             </CardContent>
           </Card>
         )}
+
+        {recentJobs.length > 0 && (
+          <Card className="bg-zinc-900 border-zinc-800 rounded-sm">
+            <CardHeader className="border-b border-zinc-800 bg-zinc-900/50 px-4 py-3">
+              <CardTitle className="text-sm font-medium text-zinc-300 flex items-center gap-2">
+                <History className="w-4 h-4 text-zinc-500" /> Queued Optimizer Runs
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="p-0">
+              <div className="overflow-auto max-h-[220px]">
+                <table className="w-full data-table" data-testid="optimizer-jobs-table">
+                  <thead className="sticky top-0 bg-zinc-900 z-10">
+                    <tr>
+                      <th>Strategy</th><th>Symbol</th><th>Status</th><th>Progress</th><th>Objective</th><th></th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {recentJobs.map((job) => (
+                      <tr key={job.id} data-testid={`optimizer-job-row-${job.id}`}>
+                        <td className="text-white">{job.meta?.strategy_name || "--"}</td>
+                        <td className="text-zinc-300">{job.meta?.symbol || "--"}</td>
+                        <td className="text-zinc-400">{job.status}</td>
+                        <td className="text-zinc-300">{(job.progress_pct || 0).toFixed(0)}%</td>
+                        <td className="text-zinc-500">{job.meta?.objective || "balanced"}</td>
+                        <td>
+                          <Button
+                            data-testid={`optimizer-job-load-${job.id}`}
+                            variant="outline"
+                            size="sm"
+                            disabled={!job.result?.result_id}
+                            onClick={() => loadJobResult(job)}
+                            className="h-7 rounded-sm border-zinc-700 text-[10px]"
+                          >
+                            Load
+                          </Button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </CardContent>
+          </Card>
+        )}
       </div>
     </TooltipProvider>
   );
@@ -393,6 +627,7 @@ function HeatmapView({ heatmap, metric, onMetricChange, bestParams }) {
     : metric === "sharpe" ? "sharpe"
     : metric === "win_rate" ? "win_rate"
     : metric === "drawdown" ? "drawdown"
+    : metric === "objective_score" ? "objective_score"
     : "return_pct";
 
   // Calculate min/max for color scaling
@@ -440,6 +675,7 @@ function HeatmapView({ heatmap, metric, onMetricChange, bestParams }) {
             <SelectItem value="sharpe">Sharpe Ratio</SelectItem>
             <SelectItem value="win_rate">Win Rate %</SelectItem>
             <SelectItem value="drawdown">Max Drawdown %</SelectItem>
+            <SelectItem value="objective_score">Objective Score</SelectItem>
           </SelectContent>
         </Select>
       </CardHeader>
@@ -564,7 +800,7 @@ function HeatmapView({ heatmap, metric, onMetricChange, bestParams }) {
 
 /* ================ RESULTS TABLE ================ */
 function ResultsTable({ results, expandedRow, setExpandedRow }) {
-  const [sortKey, setSortKey] = useState("total_return_pct");
+  const [sortKey, setSortKey] = useState("objective_score");
   const [sortDir, setSortDir] = useState("desc");
 
   const sorted = useMemo(() => {
@@ -598,6 +834,9 @@ function ResultsTable({ results, expandedRow, setExpandedRow }) {
               <tr>
                 <th className="w-8">#</th>
                 <th>Parameters</th>
+                <th className="cursor-pointer select-none" onClick={() => toggleSort("objective_score")}>
+                  Score <SortIcon col="objective_score" />
+                </th>
                 <th className="cursor-pointer select-none" onClick={() => toggleSort("total_return_pct")}>
                   Return % <SortIcon col="total_return_pct" />
                 </th>
@@ -637,6 +876,7 @@ function ResultsTable({ results, expandedRow, setExpandedRow }) {
                       </span>
                     ))}
                   </td>
+                  <td className="text-amber-400 font-bold">{r.objective_score?.toFixed(2)}</td>
                   <td className={r.total_return_pct >= 0 ? "text-profit font-bold" : "text-loss font-bold"}>
                     {r.total_return_pct >= 0 ? "+" : ""}{r.total_return_pct?.toFixed(2)}%
                   </td>

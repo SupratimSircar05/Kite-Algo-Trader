@@ -159,6 +159,8 @@ class BacktestResult(BaseModel):
     sharpe_ratio: float = 0.0
     expectancy: float = 0.0
     avg_trade_duration: float = 0.0
+    avg_slippage_bps: float = 0.0
+    slippage_cost_total: float = 0.0
     equity_curve: List[Dict[str, Any]] = Field(default_factory=list)
     trades: List[Dict[str, Any]] = Field(default_factory=list)
     parameters: Dict[str, Any] = Field(default_factory=dict)

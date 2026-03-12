@@ -1,0 +1,78 @@
+{
+  "summary": "Complete testing of KiteAlgo memory optimization and ML integration features. All 19 backend API tests passed. Frontend pages verified - Dashboard, Backtest Lab with ML toggle, Optimizer with ML toggle and combination limit. All critical features working correctly.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Dashboard charts", "issues": ["Console warning about chart width/height being -1, but charts still render correctly"]}
+    ]
+  },
+  "passed_tests": [
+    "POST /api/backtest/run with trendshift and use_ml_filter=true - works correctly",
+    "POST /api/backtest/run with trendshift and use_ml_filter=false - works correctly",
+    "GET /api/backtest/results - returns list of backtest results",
+    "POST /api/optimizer/run with small grid under 2000 combinations - completes successfully",
+    "POST /api/optimizer/run rejects > 2000 combinations with proper error message",
+    "POST /api/optimizer/run with trendshift and ML filter in fixed_params - works correctly",
+    "GET /api/optimizer/results - returns list of optimizer results",
+    "POST /api/walkforward/run with sma_crossover - returns walk-forward results",
+    "GET /api/walkforward/results - returns list of walk-forward results",
+    "GET /api/jobs - returns list of analysis jobs",
+    "GET /api/jobs?kind=backtest - filters by backtest kind",
+    "GET /api/jobs?kind=optimizer - filters by optimizer kind",
+    "GET /api/chart/candles - returns candles with indicators",
+    "GET /api/chart/candles with include_indicators=true - returns full indicator data",
+    "GET /api/settings - returns settings",
+    "GET /api/strategies - includes trendshift strategy",
+    "GET /api/journal - returns trade journal data",
+    "GET /api/ml/models - returns list of ML models",
+    "GET /api/dashboard/summary - returns dashboard data",
+    "Frontend Dashboard loads at / - metrics, charts, signals table visible",
+    "Frontend Backtest Lab page loads - ML toggle visible for TrendShift",
+    "Frontend Optimizer page loads - ML toggle visible for TrendShift with preset selector"
+  ],
+  "test_report_links": [
+    "/app/backend/tests/test_memory_optimization.py",
+    "/app/test_reports/pytest/pytest_results_memory.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [],
+  "updated_files": [
+    "/app/backend/tests/test_memory_optimization.py"
+  ],
+  "success_rate": {
+    "backend": "100% (19/19 tests)",
+    "frontend": "100%"
+  },
+  "seed_data_creation": "No new seed data created - used existing backtests from previous test runs",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "All new memory optimization features tested and working: 1) Backtest with use_ml_filter parameter (true/false) for TrendShift strategy works correctly. 2) Optimizer correctly rejects combinations > 2000 with proper error message. 3) Walk-forward optimization with lightweight mode works. 4) Job queue system processes backtest and optimizer jobs correctly. 5) Frontend BacktestLab and Optimizer pages show ML toggle checkbox when TrendShift strategy is selected.",
+  "mocked_apis": {
+    "paper_trading": "Paper broker simulation for trade execution (by design)",
+    "zerodha_auth": "Real Zerodha credentials not configured - handled gracefully",
+    "telegram_alerts": "Real Telegram credentials not configured - safely skipped"
+  },
+  "features_verified": {
+    "memory_optimization": {
+      "lightweight_mode": "BacktestEngine uses lightweight=True in optimizer/walk-forward to skip storing equity_curve and trades",
+      "gc_collect": "gc.collect() runs every 25 iterations in optimizer and walk-forward loops",
+      "combination_cap": "Optimizer hard caps at 2000 combinations with proper 400 error"
+    },
+    "ml_integration": {
+      "use_ml_filter_param": "Backtest accepts use_ml_filter parameter in parameters field",
+      "trendshift_default": "use_ml_filter defaults to true in TrendShift strategy",
+      "ui_toggle_backtest": "ML Regime Filter checkbox visible in BacktestLab when TrendShift selected",
+      "ui_toggle_optimizer": "ML Regime Filter checkbox visible in Optimizer when TrendShift selected"
+    },
+    "job_queue": {
+      "backtest_jobs": "Backtests queue for reliable processing",
+      "optimizer_jobs": "Optimizers queue for reliable processing",
+      "job_status": "Jobs list with progress percentage and status"
+    }
+  }
+}

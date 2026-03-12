@@ -1,12 +1,13 @@
 import React, { useState, useEffect, useCallback } from "react";
 import axios from "axios";
 import { toast } from "sonner";
-import { LineChart as LineChartIcon, Play, Clock, TrendingUp, TrendingDown, Target } from "lucide-react";
+import { LineChart as LineChartIcon, Play, Clock, Activity, History } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Progress } from "@/components/ui/progress";
 import {
   AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip,
   ResponsiveContainer
@@ -19,6 +20,8 @@ export default function BacktestLab() {
   const [strategies, setStrategies] = useState([]);
   const [selectedResult, setSelectedResult] = useState(null);
   const [running, setRunning] = useState(false);
+  const [activeJob, setActiveJob] = useState(null);
+  const [recentJobs, setRecentJobs] = useState([]);
   const [form, setForm] = useState({
     strategy_name: "sma_crossover",
     symbol: "RELIANCE",
@@ -27,7 +30,17 @@ export default function BacktestLab() {
     initial_capital: 100000,
     quantity: 10,
     timeframe: "day",
+    use_ml_filter: true,
   });
+
+  const fetchJobs = useCallback(async () => {
+    try {
+      const res = await axios.get(`${API}/jobs`, { params: { kind: "backtest", limit: 8 } });
+      setRecentJobs(res.data);
+    } catch (e) {
+      console.error(e);
+    }
+  }, []);
 
   const fetchResults = useCallback(async () => {
     try {
@@ -38,23 +51,86 @@ export default function BacktestLab() {
     }
   }, []);
 
-  useEffect(() => { fetchResults(); }, [fetchResults]);
+  useEffect(() => {
+    fetchResults();
+    fetchJobs();
+    const savedJobId = window.localStorage.getItem("kitealgo-backtest-job-id");
+    if (savedJobId) {
+      axios.get(`${API}/jobs/${savedJobId}`).then((res) => setActiveJob(res.data)).catch(() => {
+        window.localStorage.removeItem("kitealgo-backtest-job-id");
+      });
+    }
+  }, [fetchResults, fetchJobs]);
 
   useEffect(() => {
     axios.get(`${API}/strategies`).then((res) => setStrategies(res.data)).catch(() => {});
   }, []);
 
+  useEffect(() => {
+    if (!activeJob?.id || ["completed", "failed", "cancelled"].includes(activeJob.status)) return undefined;
+    const timer = window.setInterval(async () => {
+      try {
+        const res = await axios.get(`${API}/jobs/${activeJob.id}`);
+        const job = res.data;
+        setActiveJob(job);
+        if (job.status === "completed") {
+          window.localStorage.removeItem("kitealgo-backtest-job-id");
+          if (job.result?.result_id) {
+            const detail = await axios.get(`${API}/backtest/results/${job.result.result_id}`);
+            setSelectedResult(detail.data);
+            toast.success("Backtest completed successfully");
+            fetchResults();
+            fetchJobs();
+          }
+        }
+        if (job.status === "failed") {
+          window.localStorage.removeItem("kitealgo-backtest-job-id");
+          toast.error(job.error || "Backtest job failed");
+          fetchJobs();
+        }
+      } catch (e) {
+        console.error(e);
+      }
+    }, 2000);
+    return () => window.clearInterval(timer);
+  }, [activeJob, fetchResults, fetchJobs]);
+
   const runBacktest = async () => {
     setRunning(true);
     try {
-      const res = await axios.post(`${API}/backtest/run`, form);
-      setSelectedResult(res.data);
-      toast.success(`Backtest complete: ${res.data.total_trades} trades`);
-      fetchResults();
+      const payload = {
+        ...form,
+        execution_mode: "queue",
+        parameters: form.strategy_name === "trendshift" ? { use_ml_filter: form.use_ml_filter } : {},
+      };
+      delete payload.use_ml_filter;
+      const res = await axios.post(`${API}/backtest/run`, payload);
+      if (res.data.status === "queued") {
+        setActiveJob({ id: res.data.job_id, status: "queued", progress_pct: 0, message: res.data.message });
+        window.localStorage.setItem("kitealgo-backtest-job-id", res.data.job_id);
+        toast.info(`Backtest queued with ${res.data.estimated_candles} candles`);
+        fetchJobs();
+      } else {
+        setSelectedResult(res.data);
+        toast.success(`Backtest complete: ${res.data.total_trades} trades`);
+        fetchResults();
+      }
     } catch (e) {
       toast.error(e.response?.data?.detail || "Backtest failed");
     } finally {
       setRunning(false);
+    }
+  };
+
+  const loadJobResult = async (job) => {
+    if (!job?.result?.result_id) return;
+    try {
+      const detail = await axios.get(`${API}/backtest/results/${job.result.result_id}`);
+      setSelectedResult(detail.data);
+      setActiveJob(job);
+      toast.info("Loaded queued backtest result");
+    } catch (e) {
+      toast.error("Failed to load queued result");
     }
   };
 
@@ -68,10 +144,34 @@ export default function BacktestLab() {
             <LineChartIcon className="w-5 h-5 text-blue-500" /> Backtest Lab
           </h1>
           <p className="text-xs text-zinc-500 font-mono mt-0.5">
-            Run strategies against historical data
+            Queue long backtests safely and resume progress after reload
           </p>
         </div>
       </div>
+
+      {activeJob && (
+        <Card data-testid="backtest-job-card" className="bg-blue-950/20 border-blue-900/50 rounded-sm">
+          <CardContent className="p-4 space-y-3">
+            <div className="flex flex-col gap-2 lg:flex-row lg:items-center lg:justify-between">
+              <div>
+                <div className="flex items-center gap-2 text-sm font-medium text-white">
+                  <Activity className="h-4 w-4 text-blue-400" /> Backtest Job Status
+                </div>
+                <div data-testid="backtest-job-message" className="mt-1 text-xs font-mono text-zinc-400">
+                  {activeJob.message || "Queued"}
+                </div>
+              </div>
+              <div data-testid="backtest-job-state" className="text-xs font-mono text-blue-300">
+                {activeJob.status?.toUpperCase()} · {(activeJob.progress_pct || 0).toFixed(0)}%
+              </div>
+            </div>
+            <Progress data-testid="backtest-job-progress" value={activeJob.progress_pct || 0} className="h-2 bg-blue-950/40 [&>div]:bg-blue-500" />
+            <div className="text-[11px] font-mono text-zinc-500">
+              Uses saved strategy defaults from Strategy Editor unless you override them via API.
+            </div>
+          </CardContent>
+        </Card>
+      )}
 
       {/* Config Panel */}
       <Card className="bg-zinc-900 border-zinc-800 rounded-sm">
@@ -138,6 +238,24 @@ export default function BacktestLab() {
               </Button>
             </div>
           </div>
+          {form.strategy_name === "trendshift" && (
+            <div className="mt-3 flex items-center gap-3">
+              <label data-testid="ml-filter-toggle" className="flex items-center gap-2 cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={form.use_ml_filter}
+                  onChange={(e) => setForm(f => ({...f, use_ml_filter: e.target.checked}))}
+                  className="w-3.5 h-3.5 rounded-sm bg-zinc-800 border-zinc-600 accent-amber-500"
+                />
+                <span className="text-xs text-zinc-400">
+                  ML Regime Filter
+                </span>
+              </label>
+              <span className="text-[10px] font-mono text-zinc-600">
+                {form.use_ml_filter ? "RandomForest predictions will confirm trade direction" : "Pure indicator-based signals only"}
+              </span>
+            </div>
+          )}
         </CardContent>
       </Card>
 
@@ -153,7 +271,7 @@ export default function BacktestLab() {
             <BtMetric label="Max DD" value={`${m.max_drawdown_pct?.toFixed(2)}%`} color="text-loss" />
             <BtMetric label="Sharpe" value={m.sharpe_ratio?.toFixed(2)} />
             <BtMetric label="Profit Factor" value={m.profit_factor?.toFixed(2)} />
-            <BtMetric label="Expectancy" value={m.expectancy?.toFixed(2)} />
+            <BtMetric label="Slip (bps)" value={m.avg_slippage_bps?.toFixed(2)} />
           </div>
 
           {/* Equity Curve */}
@@ -222,6 +340,50 @@ export default function BacktestLab() {
             </CardContent>
           </Card>
         </>
+      )}
+
+      {recentJobs.length > 0 && (
+        <Card className="bg-zinc-900 border-zinc-800 rounded-sm">
+          <CardHeader className="border-b border-zinc-800 bg-zinc-900/50 px-4 py-3">
+            <CardTitle className="text-sm font-medium text-zinc-300 flex items-center gap-2">
+              <History className="w-4 h-4 text-zinc-500" /> Queued Backtests
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="p-0">
+            <div className="overflow-auto max-h-[220px]">
+              <table className="w-full data-table" data-testid="backtest-jobs-table">
+                <thead className="sticky top-0 bg-zinc-900 z-10">
+                  <tr>
+                    <th>Strategy</th><th>Symbol</th><th>Status</th><th>Progress</th><th>Queued</th><th></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {recentJobs.map((job) => (
+                    <tr key={job.id} data-testid={`backtest-job-row-${job.id}`}>
+                      <td className="text-white">{job.meta?.strategy_name || "--"}</td>
+                      <td className="text-zinc-300">{job.meta?.symbol || "--"}</td>
+                      <td className="text-zinc-400">{job.status}</td>
+                      <td className="text-zinc-300">{(job.progress_pct || 0).toFixed(0)}%</td>
+                      <td className="text-zinc-500 text-xs">{job.queued_at?.substring(0, 16)}</td>
+                      <td>
+                        <Button
+                          data-testid={`backtest-job-load-${job.id}`}
+                          variant="outline"
+                          size="sm"
+                          disabled={!job.result?.result_id}
+                          onClick={() => loadJobResult(job)}
+                          className="h-7 rounded-sm border-zinc-700 text-[10px]"
+                        >
+                          Load
+                        </Button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </CardContent>
+        </Card>
       )}
 
       {/* Past Results */}

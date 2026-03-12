@@ -5,7 +5,7 @@ from datetime import datetime
 from typing import Dict, Any, List
 
 class AlgoTradingAPITester:
-    def __init__(self, base_url="https://kiteflow-staging.preview.emergentagent.com/api"):
+    def __init__(self, base_url="https://trendshift-bot.preview.emergentagent.com/api"):
         self.base_url = base_url
         self.tests_run = 0
         self.tests_passed = 0
