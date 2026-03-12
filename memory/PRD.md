@@ -34,25 +34,44 @@ Build a production-style, end-to-end Python algo trading bot for Indian markets 
   - `risk.py` - Risk manager with 11+ checks, kill switch, position sizing helpers
   - `execution.py` - Order manager, trade engine with PnL tracking
   - `backtest.py` - Backtesting engine with Sharpe, CAGR, drawdown, equity curve
+  - `trendshift.py` - Proprietary multi-factor TrendShift strategy with demand/supply zones
+  - `alerts.py` - Telegram/webhook alert manager with graceful safe-skip behavior
+  - `walk_forward.py` - Walk-forward optimization engine for out-of-sample testing
+  - `live_ticks.py` - Zerodha ticker buffer/consumer foundation for live streaming
+  - `ml_signals.py` - ML signal service hooks for future sklearn-based predictions
+  - `portfolio_risk.py` - Portfolio-level exposure and sector risk analyzer
 
 ### FastAPI API Endpoints
 - Dashboard summary, bot start/stop, signals, orders, trades, positions
 - Strategy CRUD, risk config, kill switch toggle
 - Backtest run/results, settings management
 - Instruments, equity curve, daily PnL, health check
+- Trade Journal APIs: `/api/journal`, `/api/journal/export`
+- Chart APIs: `/api/chart/candles` with indicators, zones, TrendShift signal overlays
+- Zerodha auth readiness APIs: `/api/auth/zerodha/start`, `/api/auth/zerodha/status`, `/api/auth/zerodha/callback`
+- Walk-forward API alias: `/api/backtest/walk_forward`
+- Alerts APIs: `/api/alerts/status`, `/api/alerts/test`, `/api/alerts/notify`
+- Multi-symbol control: `/api/bot/start-multi`
 
-### React Dashboard (6 pages)
+### React Dashboard (8 pages)
 - Dashboard Overview (metrics, equity curve, daily PnL, recent signals/trades)
 - Trade Monitor (orders, trades, positions, signals tabs with filtering)
 - Backtest Lab (configurable backtests with equity curves and trade tables)
 - Strategy Editor (parameter config, instruments, enable/disable)
 - Risk Controls (kill switch, loss limits, position limits, safety controls)
 - Settings (Zerodha credentials, trading mode, alerts config, instruments)
+- Trade Journal (filters, summary metrics, CSV/JSON export actions)
+- Candlestick Lab (SVG candlestick chart, EMA/Supertrend overlays, TrendShift signal tape, demand/supply zones)
+
+### Current Integration Status
+- Zerodha auth flow is wired for safe start/status/callback handling, but real login/session validation still depends on user-provided credentials.
+- Telegram/webhook alerts are wired with test/status endpoints and safe skips when credentials are absent.
+- Paper broker remains the default execution path for all self-tests and UI verification.
 
 ## Test Results
-- Backend: 95.7% -> 100% after ObjectId fix
-- Frontend: 100%
-- Overall: 97.8% -> 100%
+- Iteration 1: Backend 95.7%, Frontend 100% after initial platform build
+- Iteration 2: Backend 100%, Frontend 100% for optimizer feature
+- Iteration 3: Backend 100%, Frontend 100% for journal/chart/auth/alert/walk-forward additions
 
 ## Prioritized Backlog
 ### P0 (Critical)
@@ -63,27 +82,36 @@ Build a production-style, end-to-end Python algo trading bot for Indian markets 
 - [x] Strategy editor
 
 ### P1 (Important)
-- [ ] Live trading flow with Zerodha auth redirect
-- [ ] WebSocket live tick integration
+- [x] Trade journal export (CSV/JSON)
+- [x] Zerodha auth readiness flow (status/start/callback endpoints with safe handling)
+- [x] Candlestick chart with indicators and TrendShift overlays
+- [x] Alert configuration UI with safe Telegram/webhook test flow
+- [ ] Live trading with validated real Zerodha credentials
+- [ ] WebSocket live tick integration wired end-to-end to UI
 - [ ] Real-time position updates
-- [ ] Trade journal export (CSV/PDF)
-- [ ] Telegram alerts when bot token configured
+- [ ] Telegram live delivery validation with real credentials
 
 ### P2 (Nice to Have)
 - [ ] ML signal module hooks
 - [ ] Options strategies support
 - [ ] Portfolio-level risk management
 - [ ] Additional broker abstractions
-- [ ] Strategy parameter optimization
+- [x] Strategy parameter optimization
+- [ ] Walk-forward optimization UI
 - [ ] Multi-timeframe analysis
-- [ ] Candlestick chart with indicators
+- [x] Candlestick chart with indicators
 
 ## Next Tasks
-1. Implement Zerodha login flow (redirect auth)
-2. Add WebSocket live tick integration
-3. Trade journal with export functionality
-4. Performance optimization for large datasets
-5. CLI commands (init-db, sync-instruments, etc.)
+1. Validate Zerodha OAuth callback with real credentials and persist working access token lifecycle
+2. Wire live tick streaming into dashboard/chart refresh flows
+3. Add a dedicated walk-forward frontend lab page and result visualizations
+4. Extend alerts from test/manual mode to trade/risk event delivery with real credentials
+5. Build CLI commands (init-db, sync-instruments, backtest, paper-trade)
+
+## Latest Update (March 12, 2026)
+- Completed the in-progress feature batch from the previous fork by finishing the missing backend API layer and adding matching UI routes.
+- Added Trade Journal and Candlestick Lab pages, TrendShift chart overlays, Zerodha auth readiness UX, alert testing UX, and walk-forward API coverage.
+- Verified via self-tests plus testing agent iteration 3 (backend 100%, frontend 100%).
 
 ## Feature: Strategy Parameter Optimizer (March 2026)
 ### What was built
