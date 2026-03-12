@@ -1,128 +1,92 @@
-# KiteAlgo - Algo Trading Bot PRD
+# KiteAlgo - Algorithmic Trading Platform PRD
 
 ## Original Problem Statement
-Build a production-style, end-to-end Python algo trading bot for Indian markets using Zerodha Kite Connect APIs with a web-based monitoring dashboard.
+Build a production-style, end-to-end Python algorithmic trading bot for Indian markets using the Zerodha Kite Connect API. Self-controlled, modular, auditable, and testable codebase with a lightweight dashboard.
+
+## Core Requirements
+- **Broker:** Zerodha Kite Connect (paper + live modes)
+- **Language:** Python 3.11+ / React frontend
+- **Database:** MongoDB
+- **Interface:** Web dashboard + future CLI
 
 ## Architecture
-- **Backend**: FastAPI + MongoDB + Trading Bot Core Modules
-- **Frontend**: React + Shadcn/UI + Recharts + Dark Theme Dashboard
-- **Trading Bot**: Paper Broker, SMA Crossover Strategy, ORB Strategy, Risk Controls, Backtest Engine
+- **Frontend:** React + TailwindCSS + Shadcn/UI + Recharts + lightweight-charts
+- **Backend:** FastAPI + Pydantic + motor (async MongoDB)
+- **Key modules:** backtest, trendshift, ml_signals, walk_forward, job_queue, indicators, broker_paper, broker_zerodha, alerts, portfolio_risk
 
-## User Personas
-- Quantitative traders experimenting with algo strategies
-- Indian market participants wanting full control over trading systems
-- Developers building custom trading strategies
+## What's Been Implemented
 
-## Core Requirements (Static)
-1. Paper trading mode by default (NEVER auto-live)
-2. Strategy logic decoupled from broker logic
-3. Strong risk controls with kill switch
-4. Backtesting with equity curves and metrics
-5. Web dashboard for monitoring and control
-6. Easy configuration for Zerodha credentials later
+### Core Backend
+- Dashboard summary API with real-time metrics
+- Bot start/stop with paper trading
+- Signal generation, order execution, trade tracking
+- Position management
+- Risk controls with kill switch
+- Instrument management
 
-## What's Been Implemented (March 2026)
-### Backend Trading Bot Modules
-- `/app/backend/trading_bot/` - Complete trading bot core
-  - `models.py` - All Pydantic models (Signal, Order, Trade, Position, Backtest, Risk, etc.)
-  - `enums.py` - Trading enumerations (Side, OrderType, Status, etc.)
-  - `config.py` - IST timezone, market hours, fees calculation, default instruments
-  - `broker_base.py` - Abstract broker interface
-  - `broker_paper.py` - Full paper trading broker with simulated fills, slippage, fees
-  - `broker_zerodha.py` - Zerodha Kite Connect broker (ready for credentials)
-  - `strategies.py` - SMA Crossover + Opening Range Breakout strategies
-  - `risk.py` - Risk manager with 11+ checks, kill switch, position sizing helpers
-  - `execution.py` - Order manager, trade engine with PnL tracking
-  - `backtest.py` - Backtesting engine with Sharpe, CAGR, drawdown, equity curve
-  - `trendshift.py` - Proprietary multi-factor TrendShift strategy with demand/supply zones
-  - `alerts.py` - Telegram/webhook alert manager with graceful safe-skip behavior
-  - `walk_forward.py` - Walk-forward optimization engine for out-of-sample testing
-  - `live_ticks.py` - Zerodha ticker buffer/consumer foundation for live streaming
-  - `ml_signals.py` - ML signal service hooks for future sklearn-based predictions
-  - `portfolio_risk.py` - Portfolio-level exposure and sector risk analyzer
+### Backtesting & Optimization
+- BacktestEngine with full equity curve, trade tracking, slippage modeling
+- **Lightweight mode** for optimizer/walk-forward (memory-efficient, metrics-only)
+- Parameter grid search optimizer with objective scoring
+- Walk-forward optimization with train/test windows
+- Job queue system for long-running analysis tasks
+- Chunked result storage in MongoDB
 
-### FastAPI API Endpoints
-- Dashboard summary, bot start/stop, signals, orders, trades, positions
-- Strategy CRUD, risk config, kill switch toggle
-- Backtest run/results, settings management
-- Instruments, equity curve, daily PnL, health check
-- Trade Journal APIs: `/api/journal`, `/api/journal/export`
-- Chart APIs: `/api/chart/candles` with indicators, zones, TrendShift signal overlays
-- Zerodha auth readiness APIs: `/api/auth/zerodha/start`, `/api/auth/zerodha/status`, `/api/auth/zerodha/callback`
-- Walk-forward API alias: `/api/backtest/walk_forward`
-- Alerts APIs: `/api/alerts/status`, `/api/alerts/test`, `/api/alerts/notify`
-- Multi-symbol control: `/api/bot/start-multi`
+### TrendShift Strategy
+- Multi-indicator strategy: EMA ribbon, RSI, MACD, Supertrend, Bollinger Bands
+- Demand/supply zone detection
+- **ML Regime Filter** (RandomForest-based market direction prediction)
+- Slippage-aware signal generation
+- Configurable via UI with presets (Safe/Balanced/Deep)
 
-### React Dashboard (8 pages)
-- Dashboard Overview (metrics, equity curve, daily PnL, recent signals/trades)
-- Trade Monitor (orders, trades, positions, signals tabs with filtering)
-- Backtest Lab (configurable backtests with equity curves and trade tables)
-- Strategy Editor (parameter config, instruments, enable/disable)
-- Risk Controls (kill switch, loss limits, position limits, safety controls)
-- Settings (Zerodha credentials, trading mode, alerts config, instruments)
-- Trade Journal (filters, summary metrics, CSV/JSON export actions)
-- Candlestick Lab (SVG candlestick chart, EMA/Supertrend overlays, TrendShift signal tape, demand/supply zones)
+### ML Integration
+- SklearnSignalModel with RandomForest classifier
+- Market direction predictions with caching
+- Integrated into TrendShift via `use_ml_filter` parameter
+- UI toggle in BacktestLab and Optimizer pages
 
-### Current Integration Status
-- Zerodha auth flow is wired for safe start/status/callback handling, but real login/session validation still depends on user-provided credentials.
-- Telegram/webhook alerts are wired with test/status endpoints and safe skips when credentials are absent.
-- Paper broker remains the default execution path for all self-tests and UI verification.
+### Zerodha Integration
+- OAuth flow endpoints (start, callback, status)
+- Skeleton ZerodhaBroker (needs live credentials)
 
-## Test Results
-- Iteration 1: Backend 95.7%, Frontend 100% after initial platform build
-- Iteration 2: Backend 100%, Frontend 100% for optimizer feature
-- Iteration 3: Backend 100%, Frontend 100% for journal/chart/auth/alert/walk-forward additions
+### Alerts
+- Telegram alerts module (configurable, not yet connected to live bot)
+- Webhook support
+
+### Frontend Pages
+- Dashboard (metrics, equity curve, daily P&L, signals, trades)
+- Trade Monitor
+- Backtest Lab (with ML toggle, job queue integration)
+- Strategy Editor
+- Risk Controls
+- Optimizer (heatmap, results table, presets, ML toggle, save defaults)
+- Trade Journal (with CSV/JSON export)
+- Market Charts (candlestick with indicators)
+- Settings (Zerodha config, alerts config)
+
+## P0 Issues (Resolved)
+- **Memory Exhaustion** - Fixed with:
+  - Lightweight BacktestEngine mode (skips equity_curve/trades storage)
+  - gc.collect() every 25 iterations in optimizer/walk-forward
+  - Hard cap of 2000 optimizer combinations
+  - Cancelled old 227K-combination stuck job
 
 ## Prioritized Backlog
-### P0 (Critical)
-- [x] Paper trading broker
-- [x] Dashboard with real data
-- [x] Backtest engine
-- [x] Risk controls with kill switch
-- [x] Strategy editor
 
-### P1 (Important)
-- [x] Trade journal export (CSV/JSON)
-- [x] Zerodha auth readiness flow (status/start/callback endpoints with safe handling)
-- [x] Candlestick chart with indicators and TrendShift overlays
-- [x] Alert configuration UI with safe Telegram/webhook test flow
-- [ ] Live trading with validated real Zerodha credentials
-- [ ] WebSocket live tick integration wired end-to-end to UI
-- [ ] Real-time position updates
-- [ ] Telegram live delivery validation with real credentials
+### P1 - Next
+- Telegram Alerts integration (keep configurable)
+- Live Tick Integration (WebSocket consumer)
+- CLI Development (typer-based)
+- End-to-end testing of Zerodha Auth flow (needs credentials)
 
-### P2 (Nice to Have)
-- [ ] ML signal module hooks
-- [ ] Options strategies support
-- [ ] Portfolio-level risk management
-- [ ] Additional broker abstractions
-- [x] Strategy parameter optimization
-- [ ] Walk-forward optimization UI
-- [ ] Multi-timeframe analysis
-- [x] Candlestick chart with indicators
+### P2 - Future
+- Portfolio risk management module integration
+- Deeper ML signal enhancements
+- Options strategies support
+- Multi-broker support
+- Walk-Forward Lab page improvements
 
-## Next Tasks
-1. Validate Zerodha OAuth callback with real credentials and persist working access token lifecycle
-2. Wire live tick streaming into dashboard/chart refresh flows
-3. Add a dedicated walk-forward frontend lab page and result visualizations
-4. Extend alerts from test/manual mode to trade/risk event delivery with real credentials
-5. Build CLI commands (init-db, sync-instruments, backtest, paper-trade)
-
-## Latest Update (March 12, 2026)
-- Completed the in-progress feature batch from the previous fork by finishing the missing backend API layer and adding matching UI routes.
-- Added Trade Journal and Candlestick Lab pages, TrendShift chart overlays, Zerodha auth readiness UX, alert testing UX, and walk-forward API coverage.
-- Verified via self-tests plus testing agent iteration 3 (backend 100%, frontend 100%).
-
-## Feature: Strategy Parameter Optimizer (March 2026)
-### What was built
-- Backend POST /api/optimizer/run: Grid search across parameter ranges, returns heatmap data + sorted results
-- Backend GET /api/optimizer/results: List past optimizations
-- Backend GET /api/optimizer/results/{id}: Load full optimization with heatmap
-- Frontend /optimizer page: Config panel, heatmap visualization, sortable results table
-- Dynamic parameter range editor (min/max/step per parameter)
-- Add/remove custom parameters
-- Metric selector (Return %, Sharpe Ratio, Win Rate, Max Drawdown)
-- Color-coded heatmap with best cell highlighted
-- Previous optimizations table with load functionality
-- Max 2500 combinations safety limit
-### Test Results: 100% pass rate (backend + frontend)
+### P3 - Backlog
+- Refactor optimization logic into separate service module
+- Add comprehensive pytest test suite
+- Performance profiling under load
