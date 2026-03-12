@@ -25,6 +25,16 @@ from trading_bot.execution import OrderManager, TradeEngine
 from trading_bot.broker_paper import PaperBroker
 from trading_bot.backtest import BacktestEngine
 from trading_bot.config import is_market_open, DEFAULT_INSTRUMENTS, DEFAULT_SMA_PARAMS, DEFAULT_BREAKOUT_PARAMS
+from trading_bot.trendshift import TrendShiftStrategy
+from trading_bot.indicators import compute_all_indicators
+from trading_bot.alerts import alert_manager
+from trading_bot.walk_forward import WalkForwardEngine
+from trading_bot.live_ticks import live_tick_manager
+from trading_bot.ml_signals import ml_service
+from trading_bot.portfolio_risk import portfolio_risk_manager
+
+# Register TrendShift strategy
+STRATEGY_REGISTRY["trendshift"] = TrendShiftStrategy
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
@@ -396,6 +406,255 @@ async def toggle_kill_switch(active: bool, reason: str = "Manual toggle"):
     else:
         risk_manager.deactivate_kill_switch()
     return {"kill_switch_active": active, "reason": reason if active else None}
+
+
+# ==================== TRADE JOURNAL EXPORT ====================
+@api_router.get("/export/trades/csv")
+async def export_trades_csv():
+    """Export all trades as CSV."""
+    from fastapi.responses import StreamingResponse
+    import io, csv
+    trades = await db.trades.find({}, {"_id": 0}).sort("entry_time", -1).to_list(10000)
+    if not trades:
+        raise HTTPException(404, "No trades to export")
+    output = io.StringIO()
+    fields = ["id", "symbol", "exchange", "side", "quantity", "entry_price", "exit_price",
+              "pnl", "net_pnl", "fees", "pnl_percent", "status", "strategy_name",
+              "entry_time", "exit_time", "duration_seconds", "trading_mode"]
+    writer = csv.DictWriter(output, fieldnames=fields, extrasaction="ignore")
+    writer.writeheader()
+    for t in trades:
+        writer.writerow(t)
+    output.seek(0)
+    return StreamingResponse(
+        iter([output.getvalue()]),
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=trade_journal.csv"}
+    )
+
+
+@api_router.get("/export/trades/json")
+async def export_trades_json():
+    """Export all trades as JSON."""
+    trades = await db.trades.find({}, {"_id": 0}).sort("entry_time", -1).to_list(10000)
+    return trades
+
+
+@api_router.get("/export/optimizer/csv/{result_id}")
+async def export_optimizer_csv(result_id: str):
+    """Export optimizer results as CSV."""
+    from fastapi.responses import StreamingResponse
+    import io, csv
+    result = await db.optimizer_results.find_one({"id": result_id}, {"_id": 0})
+    if not result:
+        raise HTTPException(404, "Optimizer result not found")
+    output = io.StringIO()
+    rows = result.get("results", [])
+    if not rows:
+        raise HTTPException(404, "No results to export")
+    all_param_keys = list(rows[0].get("params", {}).keys())
+    fields = all_param_keys + ["total_return_pct", "total_trades", "win_rate",
+                                "max_drawdown_pct", "sharpe_ratio", "profit_factor", "expectancy"]
+    writer = csv.DictWriter(output, fieldnames=fields, extrasaction="ignore")
+    writer.writeheader()
+    for r in rows:
+        row = {**r.get("params", {}), **{k: r.get(k) for k in fields if k not in all_param_keys}}
+        writer.writerow(row)
+    output.seek(0)
+    return StreamingResponse(
+        iter([output.getvalue()]),
+        media_type="text/csv",
+        headers={"Content-Disposition": f"attachment; filename=optimizer_{result_id}.csv"}
+    )
+
+
+# ==================== TELEGRAM ALERTS ====================
+@api_router.post("/alerts/test")
+async def test_alert():
+    """Send a test alert to configured channels."""
+    settings_doc = await db.settings.find_one({}, {"_id": 0})
+    if settings_doc:
+        alert_manager.update_config(
+            telegram_token=settings_doc.get("telegram_bot_token", ""),
+            telegram_chat_id=settings_doc.get("telegram_chat_id", ""),
+            webhook_url=settings_doc.get("webhook_url", ""),
+        )
+    if not alert_manager.telegram_configured and not alert_manager.webhook_configured:
+        return {"status": "skipped", "reason": "No alert channels configured. Set Telegram token or webhook URL in Settings."}
+    await alert_manager.send_custom("Test Alert", "KiteAlgo alert system is working.")
+    return {"status": "sent", "telegram": alert_manager.telegram_configured, "webhook": alert_manager.webhook_configured}
+
+@api_router.get("/alerts/status")
+async def alerts_status():
+    return {"telegram_configured": alert_manager.telegram_configured, "webhook_configured": alert_manager.webhook_configured}
+
+
+# ==================== ZERODHA AUTH FLOW ====================
+@api_router.get("/kite/login-url")
+async def get_kite_login_url():
+    """Get Zerodha login URL for OAuth redirect."""
+    settings_doc = await db.settings.find_one({}, {"_id": 0})
+    api_key = (settings_doc or {}).get("kite_api_key", "")
+    if not api_key:
+        raise HTTPException(400, "Set KITE_API_KEY in Settings first")
+    login_url = f"https://kite.zerodha.com/connect/login?v=3&api_key={api_key}"
+    return {"login_url": login_url, "api_key": api_key}
+
+
+@api_router.get("/kite/callback")
+async def kite_callback(request_token: str = Query(...), action: str = Query("login"), status: str = Query("success")):
+    """Handle Zerodha OAuth callback. Generates session from request_token."""
+    if status != "success":
+        raise HTTPException(400, "Login was not successful")
+    settings_doc = await db.settings.find_one({}, {"_id": 0})
+    api_key = (settings_doc or {}).get("kite_api_key", "")
+    api_secret = (settings_doc or {}).get("kite_api_secret", "")
+    if not api_key or not api_secret:
+        raise HTTPException(400, "API Key and Secret must be set in Settings")
+    try:
+        from trading_bot.broker_zerodha import ZerodhaBroker
+        broker = ZerodhaBroker(api_key=api_key, api_secret=api_secret)
+        session_data = await broker.generate_session(request_token)
+        access_token = session_data.get("access_token", "")
+        await db.settings.update_one({}, {"$set": {"kite_access_token": access_token, "updated_at": now_utc()}})
+        return {"status": "success", "access_token_set": True, "user_id": session_data.get("user_id", "")}
+    except Exception as e:
+        raise HTTPException(500, f"Session generation failed: {str(e)}")
+
+
+# ==================== WALK-FORWARD OPTIMIZATION ====================
+class WalkForwardRequest(BaseModel):
+    strategy_name: str = "sma_crossover"
+    symbol: str = "RELIANCE"
+    start_date: str = "2024-01-01"
+    end_date: str = "2025-06-01"
+    initial_capital: float = 100000.0
+    quantity: int = 10
+    n_windows: int = 5
+    train_pct: float = 0.7
+    param_ranges: Dict[str, Dict[str, float]] = Field(
+        default_factory=lambda: {"fast_period": {"min": 5, "max": 20, "step": 2}, "slow_period": {"min": 15, "max": 50, "step": 5}}
+    )
+
+@api_router.post("/walkforward/run")
+async def run_walk_forward(req: WalkForwardRequest):
+    """Run walk-forward optimization with train/test splits."""
+    try:
+        candles = await paper_broker.get_historical_data(req.symbol, "NSE", "day", req.start_date, req.end_date)
+        if not candles or len(candles) < 50:
+            raise HTTPException(400, "Insufficient data for walk-forward analysis")
+        engine = WalkForwardEngine(req.strategy_name, req.param_ranges, req.initial_capital, req.quantity)
+        result = engine.run(candles, symbol=req.symbol, n_windows=req.n_windows, train_pct=req.train_pct)
+        await db.walkforward_results.insert_one(result.copy())
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Walk-forward failed: {e}")
+        raise HTTPException(500, str(e))
+
+@api_router.get("/walkforward/results")
+async def get_walkforward_results(limit: int = Query(20, le=50)):
+    return await db.walkforward_results.find({}, {"_id": 0}).sort("created_at", -1).to_list(limit)
+
+
+# ==================== CANDLESTICK DATA + INDICATORS ====================
+@api_router.get("/candles/{symbol}")
+async def get_candle_data(symbol: str, start_date: str = "2024-06-01", end_date: str = "2025-06-01",
+                          timeframe: str = "day", include_indicators: bool = True):
+    """Get OHLCV candle data with optional indicator overlays."""
+    candles = await paper_broker.get_historical_data(symbol, "NSE", timeframe, start_date, end_date)
+    if not candles:
+        raise HTTPException(404, "No candle data available")
+    for c in candles:
+        c["symbol"] = symbol
+    indicators = {}
+    if include_indicators and len(candles) > 30:
+        indicators = compute_all_indicators(candles)
+        # Trim demand/supply zones for serialization
+        indicators["demand_zones"] = indicators.get("demand_zones", [])[-10:]
+        indicators["supply_zones"] = indicators.get("supply_zones", [])[-10:]
+    return {"candles": candles, "indicators": indicators, "count": len(candles)}
+
+
+# ==================== LIVE TICKS ====================
+@api_router.get("/ticks/status")
+async def get_tick_status():
+    return live_tick_manager.get_status()
+
+@api_router.post("/ticks/start")
+async def start_ticks(tokens: List[int] = [256265]):
+    settings_doc = await db.settings.find_one({}, {"_id": 0})
+    api_key = (settings_doc or {}).get("kite_api_key", "")
+    access_token = (settings_doc or {}).get("kite_access_token", "")
+    if not api_key or not access_token:
+        return {"status": "skipped", "reason": "Kite credentials not configured. Live ticks require API Key + Access Token."}
+    live_tick_manager.start(api_key, access_token, tokens)
+    return {"status": "started", "tokens": len(tokens)}
+
+@api_router.post("/ticks/stop")
+async def stop_ticks():
+    live_tick_manager.stop()
+    return {"status": "stopped"}
+
+
+# ==================== ML SIGNALS ====================
+@api_router.get("/ml/models")
+async def list_ml_models():
+    return ml_service.list_models()
+
+@api_router.post("/ml/predict")
+async def ml_predict(model_name: str = "sklearn_rf", symbol: str = "RELIANCE"):
+    candles = await paper_broker.get_historical_data(symbol, "NSE", "day", "2024-01-01", "2025-06-01")
+    if not candles or len(candles) < 30:
+        raise HTTPException(400, "Insufficient data")
+    signal = ml_service.generate_signal_from_candles(model_name, candles, symbol)
+    if signal:
+        return signal.model_dump()
+    return {"status": "no_signal", "reason": "Model did not generate a signal (confidence too low or not trained)"}
+
+
+# ==================== PORTFOLIO RISK ====================
+@api_router.get("/portfolio/risk")
+async def get_portfolio_risk():
+    positions = await db.positions.find({}, {"_id": 0}).to_list(500)
+    settings_doc = await db.settings.find_one({}, {"_id": 0})
+    capital = (settings_doc or {}).get("capital", 100000)
+    portfolio_risk_manager.capital = capital
+    return portfolio_risk_manager.analyze_positions(positions)
+
+
+# ==================== MULTI-SYMBOL BOT ====================
+@api_router.post("/bot/start-multi")
+async def start_multi_symbol_bot(
+    strategy_name: str = "trendshift",
+    symbols: List[str] = ["RELIANCE", "INFY", "TCS", "HDFCBANK", "SBIN", "ITC"],
+    mode: str = "paper",
+):
+    """Start bot across multiple symbols simultaneously."""
+    global bot_status, bot_run_id, bot_start_time
+    if bot_status == BotStatus.RUNNING:
+        raise HTTPException(400, "Bot is already running")
+    bot_run_id = gen_id()
+    bot_start_time = datetime.now(timezone.utc)
+    bot_status = BotStatus.RUNNING
+    run_record = BotRunRecord(
+        id=bot_run_id, mode=TradingMode(mode), strategy_name=strategy_name,
+        status=BotStatus.RUNNING, started_at=now_utc()
+    ).model_dump()
+    await db.bot_runs.insert_one(run_record)
+    # Generate signals for all symbols
+    await _generate_demo_signals(strategy_name, symbols)
+    # Send alert
+    settings_doc = await db.settings.find_one({}, {"_id": 0})
+    if settings_doc:
+        alert_manager.update_config(
+            settings_doc.get("telegram_bot_token", ""),
+            settings_doc.get("telegram_chat_id", ""),
+            settings_doc.get("webhook_url", ""),
+        )
+    await alert_manager.send_bot_status_alert("started", strategy_name, mode)
+    return {"status": "started", "run_id": bot_run_id, "symbols": symbols, "strategy": strategy_name}
 
 
 # ==================== BACKTEST ====================
