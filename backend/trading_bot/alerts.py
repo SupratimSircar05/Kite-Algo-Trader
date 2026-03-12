@@ -34,9 +34,9 @@ class AlertManager:
         return bool(self.webhook_url)
 
     def update_config(self, telegram_token: str = "", telegram_chat_id: str = "", webhook_url: str = ""):
-        self.telegram_token = telegram_token or self.telegram_token
-        self.telegram_chat_id = telegram_chat_id or self.telegram_chat_id
-        self.webhook_url = webhook_url or self.webhook_url
+        self.telegram_token = telegram_token
+        self.telegram_chat_id = telegram_chat_id
+        self.webhook_url = webhook_url
         self._enabled = bool(self.telegram_token and self.telegram_chat_id) or bool(self.webhook_url)
 
     async def send_signal_alert(self, signal_data: Dict[str, Any]):

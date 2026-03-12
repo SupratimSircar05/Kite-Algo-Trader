@@ -9,6 +9,8 @@ import StrategyEditor from "@/pages/StrategyEditor";
 import RiskControls from "@/pages/RiskControls";
 import Settings from "@/pages/Settings";
 import Optimizer from "@/pages/Optimizer";
+import TradeJournal from "@/pages/TradeJournal";
+import MarketCharts from "@/pages/MarketCharts";
 import { Toaster } from "@/components/ui/sonner";
 
 function App() {
@@ -25,6 +27,8 @@ function App() {
               <Route path="/strategies" element={<StrategyEditor />} />
               <Route path="/risk" element={<RiskControls />} />
               <Route path="/optimizer" element={<Optimizer />} />
+              <Route path="/journal" element={<TradeJournal />} />
+              <Route path="/charts" element={<MarketCharts />} />
               <Route path="/settings" element={<Settings />} />
             </Routes>
           </main>

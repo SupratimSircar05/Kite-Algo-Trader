@@ -16,6 +16,7 @@ const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
 
 export default function BacktestLab() {
   const [results, setResults] = useState([]);
+  const [strategies, setStrategies] = useState([]);
   const [selectedResult, setSelectedResult] = useState(null);
   const [running, setRunning] = useState(false);
   const [form, setForm] = useState({
@@ -38,6 +39,10 @@ export default function BacktestLab() {
   }, []);
 
   useEffect(() => { fetchResults(); }, [fetchResults]);
+
+  useEffect(() => {
+    axios.get(`${API}/strategies`).then((res) => setStrategies(res.data)).catch(() => {});
+  }, []);
 
   const runBacktest = async () => {
     setRunning(true);
@@ -82,8 +87,13 @@ export default function BacktestLab() {
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="sma_crossover">SMA Crossover</SelectItem>
-                  <SelectItem value="opening_range_breakout">ORB Strategy</SelectItem>
+                    {(strategies.length ? strategies : [
+                      { name: "sma_crossover", display_name: "SMA Crossover" },
+                      { name: "opening_range_breakout", display_name: "ORB Strategy" },
+                      { name: "trendshift", display_name: "TrendShift" },
+                    ]).map((strategy) => (
+                      <SelectItem key={strategy.name} value={strategy.name}>{strategy.display_name}</SelectItem>
+                    ))}
                 </SelectContent>
               </Select>
             </div>

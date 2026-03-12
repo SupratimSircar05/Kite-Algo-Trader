@@ -16,6 +16,8 @@ export default function Settings() {
   const [settings, setSettings] = useState(null);
   const [instruments, setInstruments] = useState([]);
   const [health, setHealth] = useState(null);
+  const [authStatus, setAuthStatus] = useState(null);
+  const [alertStatus, setAlertStatus] = useState(null);
   const [saving, setSaving] = useState(false);
   const [syncing, setSyncing] = useState(false);
 
@@ -29,6 +31,12 @@ export default function Settings() {
       setSettings(setRes.data);
       setInstruments(instRes.data);
       setHealth(healthRes.data);
+      const [authRes, alertsRes] = await Promise.all([
+        axios.get(`${API}/auth/zerodha/status`),
+        axios.get(`${API}/alerts/status`),
+      ]);
+      setAuthStatus(authRes.data);
+      setAlertStatus(alertsRes.data);
     } catch (e) {
       console.error(e);
     }
@@ -68,6 +76,34 @@ export default function Settings() {
       fetchData();
     } catch (e) {
       toast.error("Init failed");
+    }
+  };
+
+  const handleZerodhaConnect = async () => {
+    try {
+      const res = await axios.get(`${API}/auth/zerodha/start`);
+      if (!res.data.configured || !res.data.login_url) {
+        toast.error(res.data.reason || "Add your Zerodha API key first");
+        return;
+      }
+      window.open(res.data.login_url, "_blank", "noopener,noreferrer");
+      toast.info("Opened Zerodha login in a new tab");
+    } catch (e) {
+      toast.error(e.response?.data?.detail || "Unable to start Zerodha auth flow");
+    }
+  };
+
+  const handleTestAlert = async () => {
+    try {
+      const res = await axios.post(`${API}/alerts/test`);
+      if (res.data.status === "sent") {
+        toast.success("Test alert sent");
+      } else {
+        toast.info(res.data.reason || "Alert skipped");
+      }
+      fetchData();
+    } catch (e) {
+      toast.error(e.response?.data?.detail || "Unable to test alerts");
     }
   };
 
@@ -130,6 +166,17 @@ export default function Settings() {
                   <label className="text-[10px] uppercase tracking-wider text-zinc-500 block mb-1">Redirect URL</label>
                   <Input data-testid="setting-redirect-url" value={settings.kite_redirect_url} onChange={(e) => updateField("kite_redirect_url", e.target.value)} className="h-8 text-xs bg-zinc-800 border-zinc-700 font-mono" />
                 </div>
+              </div>
+              <div className="grid gap-3 lg:grid-cols-[1fr_auto] lg:items-center">
+                <div className="rounded-sm border border-zinc-800 bg-zinc-950/60 p-3 text-xs font-mono text-zinc-400" data-testid="setting-zerodha-auth-status">
+                  <div>API Key: {authStatus?.api_key_configured ? "configured" : "missing"}</div>
+                  <div>API Secret: {authStatus?.api_secret_configured ? "configured" : "missing"}</div>
+                  <div>Access Token: {authStatus?.access_token_configured ? "present" : "not generated"}</div>
+                  <div>User: {authStatus?.profile?.user_id || "Not connected"}</div>
+                </div>
+                <Button data-testid="setting-connect-zerodha-button" onClick={handleZerodhaConnect} className="rounded-sm bg-blue-600 hover:bg-blue-500">
+                  Connect Zerodha
+                </Button>
               </div>
             </CardContent>
           </Card>
@@ -279,6 +326,14 @@ export default function Settings() {
                   <label className="text-[10px] uppercase tracking-wider text-zinc-500 block mb-1">Webhook URL (optional)</label>
                   <Input data-testid="setting-webhook-url" value={settings.webhook_url} onChange={(e) => updateField("webhook_url", e.target.value)} placeholder="https://your-webhook-endpoint.com/alerts" className="h-8 text-xs bg-zinc-800 border-zinc-700 font-mono" />
                 </div>
+              </div>
+              <div className="flex flex-col gap-3 rounded-sm border border-zinc-800 bg-zinc-950/60 p-3 text-xs font-mono text-zinc-400 lg:flex-row lg:items-center lg:justify-between">
+                <div data-testid="settings-alert-channel-status">
+                  Telegram: {alertStatus?.telegram_configured ? "configured" : "missing"} · Webhook: {alertStatus?.webhook_configured ? "configured" : "missing"}
+                </div>
+                <Button data-testid="settings-test-alert-button" variant="outline" size="sm" onClick={handleTestAlert} className="rounded-sm border-zinc-700">
+                  Test Alert
+                </Button>
               </div>
             </CardContent>
           </Card>

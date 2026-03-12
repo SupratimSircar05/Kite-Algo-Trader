@@ -24,6 +24,12 @@ const DEFAULT_RANGES = {
     opening_range_minutes: { min: 5, max: 30, step: 5 },
     breakout_buffer_pct: { min: 0.05, max: 0.5, step: 0.05 },
   },
+  trendshift: {
+    ema_fast: { min: 5, max: 13, step: 2 },
+    ema_mid: { min: 13, max: 34, step: 3 },
+    ema_slow: { min: 34, max: 89, step: 5 },
+    supertrend_mult: { min: 2, max: 4, step: 0.5 },
+  },
 };
 
 export default function Optimizer() {
@@ -155,6 +161,7 @@ export default function Optimizer() {
                   <SelectContent>
                     <SelectItem value="sma_crossover">SMA Crossover</SelectItem>
                     <SelectItem value="opening_range_breakout">ORB Strategy</SelectItem>
+                    <SelectItem value="trendshift">TrendShift</SelectItem>
                   </SelectContent>
                 </Select>
               </div>

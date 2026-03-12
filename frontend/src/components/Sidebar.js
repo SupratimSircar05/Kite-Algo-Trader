@@ -2,7 +2,7 @@ import React from "react";
 import { NavLink, useLocation } from "react-router-dom";
 import {
   LayoutDashboard, ArrowRightLeft, LineChart, Settings,
-  ShieldAlert, Terminal, Zap, Grid3x3
+  ShieldAlert, Terminal, Zap, Grid3x3, BookOpenText, CandlestickChart
 } from "lucide-react";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 
@@ -13,6 +13,8 @@ const navItems = [
   { path: "/strategies", icon: Terminal, label: "Strategies", shortcut: "S" },
   { path: "/risk", icon: ShieldAlert, label: "Risk Controls", shortcut: "R" },
   { path: "/optimizer", icon: Grid3x3, label: "Optimizer", shortcut: "O" },
+  { path: "/journal", icon: BookOpenText, label: "Trade Journal", shortcut: "J" },
+  { path: "/charts", icon: CandlestickChart, label: "Charts", shortcut: "C" },
   { path: "/settings", icon: Settings, label: "Settings", shortcut: "G" },
 ];
 
